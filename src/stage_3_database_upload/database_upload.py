@@ -7,8 +7,8 @@ then inserts fresh data. Use --dry-run flag to test connectivity and validation 
 modifying the database.
 
 Usage:
-    python main_database_upload.py              # Full upload (deletes and inserts)
-    python main_database_upload.py --dry-run   # Test mode (no database changes)
+    PYTHONPATH=src python src/stage_3_database_upload/database_upload.py
+    PYTHONPATH=src python src/stage_3_database_upload/database_upload.py --dry-run
 """
 
 import argparse
@@ -60,7 +60,9 @@ EXPECTED_COLUMNS = [
 ]
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
+)
 log = logging.getLogger(__name__)
 
 

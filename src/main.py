@@ -22,7 +22,9 @@ from stage_2_data_processing.data_processing import main as stage_2
 from stage_3_database_upload.database_upload import main as stage_3
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
+)
 log = logging.getLogger(__name__)
 
 
