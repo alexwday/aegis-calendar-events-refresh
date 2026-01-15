@@ -19,9 +19,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
-import yaml
 from dotenv import load_dotenv
 from dateutil.parser import parse as dateutil_parse
+import yaml
+
+from rbc_security import configure_ssl
 
 import fds.sdk.EventsandTranscripts
 from fds.sdk.EventsandTranscripts.api import calendar_events_api
@@ -35,12 +37,9 @@ from fds.sdk.EventsandTranscripts.models import (
 # Load environment variables from project root
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-
-def load_config():
-    """Load configuration from local config file."""
-    config_path = Path(__file__).parent.parent / "config" / "calendar_config.yaml"
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+# Configuration (hardcoded - change here if needed)
+PAST_MONTHS = 6
+FUTURE_MONTHS = 6
 
 
 def load_monitored_institutions():
@@ -50,27 +49,7 @@ def load_monitored_institutions():
         return yaml.safe_load(f)
 
 
-def setup_ssl_certificate(ssl_cert_path: str) -> str:
-    """Set up SSL certificate for API calls."""
-    # If path is absolute and exists, use it directly
-    if os.path.isabs(ssl_cert_path) and os.path.exists(ssl_cert_path):
-        cert_path = ssl_cert_path
-    else:
-        # Try relative to project root
-        cert_path = str(Path(__file__).parent.parent / ssl_cert_path)
-
-    if os.path.exists(cert_path):
-        os.environ["REQUESTS_CA_BUNDLE"] = cert_path
-        os.environ["SSL_CERT_FILE"] = cert_path
-        print(f"  SSL certificate configured: {cert_path}")
-        return cert_path
-    else:
-        print(f"  WARNING: SSL certificate not found at {cert_path}")
-        print(f"  API calls may fail without proper SSL configuration")
-        return None
-
-
-def configure_api_client(ssl_cert_path: str = None):
+def configure_api_client():
     """Configure the FactSet API client with proxy and authentication."""
     # Build proxy URL with domain authentication
     proxy_user = os.getenv("PROXY_USER")
@@ -85,7 +64,6 @@ def configure_api_client(ssl_cert_path: str = None):
         username=os.getenv("API_USERNAME"),
         password=os.getenv("API_PASSWORD"),
         proxy=proxy_url,
-        ssl_ca_cert=ssl_cert_path,
     )
     configuration.get_basic_auth_token()
 
@@ -197,37 +175,22 @@ def main():
     print("=" * 60)
     print()
 
-    # Step 1: Load configuration
-    print("[1/6] Loading configuration...")
-    config = load_config().get("stage_1", {})
-    date_range = config.get("date_range", {})
-    past_months = date_range.get("past_months", 6)
-    future_months = date_range.get("future_months", 6)
-    print(f"  Date range: {past_months} months back, {future_months} months forward")
-
-    # Step 2: Load monitored institutions
-    print("\n[2/6] Loading monitored institutions...")
+    # Step 1: Load monitored institutions
+    print("[1/4] Loading monitored institutions...")
     institutions = load_monitored_institutions()
     tickers = list(institutions.keys())
     print(f"  Loaded {len(tickers)} tickers")
 
-    # Step 3: Setup SSL certificate
-    print("\n[3/6] Setting up SSL certificate...")
-    ssl_cert_path = config.get("ssl_cert_path")
-    cert_path = None
-    if ssl_cert_path:
-        cert_path = setup_ssl_certificate(ssl_cert_path)
-    else:
-        print("  No SSL certificate path configured")
+    # Step 2: Configure SSL and API client
+    print("\n[2/4] Configuring API client...")
+    configure_ssl()
+    api_config = configure_api_client()
+    print("  API client configured")
 
-    # Step 4: Configure API client
-    print("\n[4/6] Configuring API client...")
-    api_config = configure_api_client(cert_path)
-    print("  API client configured with proxy authentication")
-
-    # Step 5: Query API
-    print("\n[5/6] Querying FactSet Calendar Events API...")
-    start_date, end_date = calculate_date_range(past_months, future_months)
+    # Step 3: Query API
+    print("\n[3/4] Querying FactSet Calendar Events API...")
+    print(f"  Date range: {PAST_MONTHS} months back, {FUTURE_MONTHS} months forward")
+    start_date, end_date = calculate_date_range(PAST_MONTHS, FUTURE_MONTHS)
 
     with fds.sdk.EventsandTranscripts.ApiClient(api_config) as api_client:
         api_instance = calendar_events_api.CalendarEventsApi(api_client)
@@ -235,8 +198,8 @@ def main():
 
     print(f"\n  Total events retrieved: {len(events)}")
 
-    # Step 6: Save raw data
-    print("\n[6/6] Saving raw data...")
+    # Step 4: Save raw data
+    print("\n[4/4] Saving raw data...")
     output_path = Path(__file__).parent / "output" / "raw_calendar_events.csv"
     save_raw_data(events, output_path)
 

@@ -22,13 +22,14 @@ import yaml
 import pytz
 from dateutil.parser import parse as dateutil_parse
 
+# =============================================================================
+# CONFIGURATION (hardcoded - change here if needed)
+# =============================================================================
 
-def load_config():
-    """Load configuration from local config file."""
-    config_path = Path(__file__).parent.parent / "config" / "calendar_config.yaml"
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+LOCAL_TIMEZONE = "America/Toronto"
 
+# Earnings event priority (first = highest, kept when duplicates exist)
+EARNINGS_PRIORITY = ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"]
 
 # =============================================================================
 # FIELD MAPPING - Update this when switching data sources (API → Snowflake)
@@ -103,7 +104,7 @@ def get_mapped_value(raw_event: dict, internal_field: str, default=""):
     return raw_event.get(source_field, default) or default
 
 
-def convert_to_local_time(utc_datetime_str: str, local_timezone: str) -> tuple:
+def convert_to_local_time(utc_datetime_str: str) -> tuple:
     """
     Convert UTC datetime string to local time.
     Returns: (utc_iso, local_iso, date_str, time_with_tz)
@@ -120,7 +121,7 @@ def convert_to_local_time(utc_datetime_str: str, local_timezone: str) -> tuple:
             dt = pytz.UTC.localize(dt)
 
         # Convert to local timezone
-        local_tz = pytz.timezone(local_timezone)
+        local_tz = pytz.timezone(LOCAL_TIMEZONE)
         dt_local = dt.astimezone(local_tz)
 
         # Format outputs
@@ -155,7 +156,7 @@ def build_contact_info(raw_event: dict) -> str:
     return " | ".join(parts)
 
 
-def process_event(raw_event: dict, institutions: dict, timestamp: str, local_timezone: str) -> dict:
+def process_event(raw_event: dict, institutions: dict, timestamp: str) -> dict:
     """
     Process a single raw event into the output schema format.
     """
@@ -167,7 +168,7 @@ def process_event(raw_event: dict, institutions: dict, timestamp: str, local_tim
     institution = institutions.get(ticker, {})
 
     # Convert timezone
-    utc_iso, local_iso, date_str, time_with_tz = convert_to_local_time(event_datetime_utc, local_timezone)
+    utc_iso, local_iso, date_str, time_with_tz = convert_to_local_time(event_datetime_utc)
 
     # Build processed event matching OUTPUT_SCHEMA
     return {
@@ -190,13 +191,13 @@ def process_event(raw_event: dict, institutions: dict, timestamp: str, local_tim
     }
 
 
-def deduplicate_earnings_events(events: list, earnings_priority: list) -> list:
+def deduplicate_earnings_events(events: list) -> list:
     """
     Deduplicate earnings-related events for the same institution and fiscal period.
-    Priority order determined by earnings_priority list (first = highest priority).
+    Priority order determined by EARNINGS_PRIORITY constant (first = highest priority).
     """
     # Build priority lookup
-    priority_lookup = {et: i for i, et in enumerate(earnings_priority)}
+    priority_lookup = {et: i for i, et in enumerate(EARNINGS_PRIORITY)}
 
     # Group events by ticker + fiscal period
     event_groups = defaultdict(list)
@@ -264,16 +265,8 @@ def main():
     print("=" * 60)
     print()
 
-    # Step 1: Load configuration
-    print("[1/6] Loading configuration...")
-    config = load_config().get("stage_2", {})
-    local_timezone = config.get("local_timezone", "America/Toronto")
-    earnings_priority = config.get("earnings_priority", ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"])
-    print(f"  Local timezone: {local_timezone}")
-    print(f"  Earnings priority: {earnings_priority}")
-
-    # Step 2: Load raw data from Stage 1
-    print("\n[2/6] Loading raw data from Stage 1...")
+    # Step 1: Load raw data from Stage 1
+    print("[1/5] Loading raw data from Stage 1...")
     input_path = Path(__file__).parent.parent / "stage_1_data_acquisition" / "output" / "raw_calendar_events.csv"
 
     if not input_path.exists():
@@ -284,14 +277,15 @@ def main():
     raw_events = load_raw_data(input_path)
     print(f"  Loaded {len(raw_events)} raw events")
 
-    # Step 3: Load institution metadata
-    print("\n[3/6] Loading institution metadata...")
+    # Step 2: Load institution metadata
+    print("\n[2/5] Loading institution metadata...")
     institutions = load_monitored_institutions()
     print(f"  Loaded {len(institutions)} institutions")
 
-    # Step 4: Process events
-    print("\n[4/6] Processing events...")
-    print(f"  Using field mapping:")
+    # Step 3: Process events
+    print("\n[3/5] Processing events...")
+    print(f"  Timezone: {LOCAL_TIMEZONE}")
+    print(f"  Field mapping:")
     for internal, source in FIELD_MAPPING.items():
         print(f"    {internal} <- {source}")
 
@@ -299,15 +293,16 @@ def main():
     processed_events = []
 
     for raw_event in raw_events:
-        processed = process_event(raw_event, institutions, timestamp, local_timezone)
+        processed = process_event(raw_event, institutions, timestamp)
         processed_events.append(processed)
 
     print(f"  Processed {len(processed_events)} events")
 
-    # Step 5: Deduplicate earnings events
-    print("\n[5/6] Deduplicating earnings events...")
+    # Step 4: Deduplicate earnings events
+    print("\n[4/5] Deduplicating earnings events...")
+    print(f"  Priority: {EARNINGS_PRIORITY}")
     before_count = len(processed_events)
-    processed_events = deduplicate_earnings_events(processed_events, earnings_priority)
+    processed_events = deduplicate_earnings_events(processed_events)
     after_count = len(processed_events)
     removed = before_count - after_count
     print(f"  Before: {before_count}, After: {after_count}, Removed: {removed}")
@@ -315,8 +310,8 @@ def main():
     # Sort by event date
     processed_events.sort(key=lambda x: x.get("event_date_time_utc", ""))
 
-    # Step 6: Save processed data
-    print("\n[6/6] Saving processed data...")
+    # Step 5: Save processed data
+    print("\n[5/5] Saving processed data...")
     output_path = Path(__file__).parent / "output" / "processed_calendar_events.csv"
     save_processed_data(processed_events, output_path)
     print(f"  Saved to: {output_path}")
