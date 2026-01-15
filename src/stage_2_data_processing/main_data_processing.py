@@ -31,6 +31,21 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 LOCAL_TIMEZONE = "America/Toronto"
 
+# Event types to include (filter out any not in this list)
+# Add new event types here as they are discovered and approved
+INCLUDED_EVENT_TYPES = [
+    "Earnings",
+    "ConfirmedEarningsRelease",
+    "ProjectedEarningsRelease",
+    "Dividend",
+    "Conference",
+    "ShareholdersMeeting",
+    "SalesRevenueRelease",
+    "SalesRevenueCall",
+    "AnalystsInvestorsMeeting",
+    "SpecialSituation",
+]
+
 # Earnings event priority (first = highest, kept when duplicates exist)
 EARNINGS_PRIORITY = ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"]
 
@@ -207,6 +222,31 @@ def validate_datetime_conversions(events: list) -> bool:
     return True
 
 
+def filter_event_types(events: list) -> list:
+    """
+    Filter events to only include approved event types.
+    Logs warnings for any unknown event types that are filtered out.
+    """
+    filtered = []
+    excluded_types = defaultdict(int)
+
+    for event in events:
+        event_type = event.get("event_type", "")
+        if event_type in INCLUDED_EVENT_TYPES:
+            filtered.append(event)
+        else:
+            excluded_types[event_type] += 1
+
+    # Log warnings for unknown event types
+    if excluded_types:
+        print("\n  WARNING: Unknown event types filtered out:")
+        for event_type, count in sorted(excluded_types.items(), key=lambda x: -x[1]):
+            print(f"    - '{event_type}': {count} events")
+        print("  To include these, add them to INCLUDED_EVENT_TYPES in config")
+
+    return filtered
+
+
 def build_contact_info(raw_event: dict) -> str:
     """Build contact info string from separate fields."""
     parts = []
@@ -370,7 +410,7 @@ def main():
     print()
 
     # Step 1: Load raw data from Stage 1
-    print("[1/5] Loading raw data from Stage 1...")
+    print("[1/6] Loading raw data from Stage 1...")
     input_path = _get_input_path()
     if not input_path.exists():
         print(f"  ERROR: Input file not found: {input_path}")
@@ -381,12 +421,12 @@ def main():
     print(f"  Loaded {len(raw_events)} raw events")
 
     # Step 2: Load institution metadata
-    print("\n[2/5] Loading institution metadata...")
+    print("\n[2/6] Loading institution metadata...")
     institutions = load_monitored_institutions()
     print(f"  Loaded {len(institutions)} institutions")
 
     # Step 3: Process events
-    print("\n[3/5] Processing events...")
+    print("\n[3/6] Processing events...")
     print(f"  Timezone: {LOCAL_TIMEZONE}")
     timestamp = datetime.now(pytz.UTC).isoformat()
     processed_events = [
@@ -401,8 +441,16 @@ def main():
     else:
         print("  Datetime validation: ISSUES FOUND (see above)")
 
-    # Step 4: Deduplicate earnings events
-    print("\n[4/5] Deduplicating earnings events...")
+    # Step 4: Filter event types
+    print("\n[4/6] Filtering event types...")
+    print(f"  Included types: {len(INCLUDED_EVENT_TYPES)}")
+    before_filter = len(processed_events)
+    processed_events = filter_event_types(processed_events)
+    filtered_count = before_filter - len(processed_events)
+    print(f"  Kept: {len(processed_events)}, Filtered out: {filtered_count}")
+
+    # Step 5: Deduplicate earnings events
+    print("\n[5/6] Deduplicating earnings events...")
     print(f"  Priority: {EARNINGS_PRIORITY}")
     before_count = len(processed_events)
     processed_events = deduplicate_earnings_events(processed_events)
@@ -413,8 +461,8 @@ def main():
     # Sort by event date
     processed_events.sort(key=lambda x: x.get("event_date_time_utc", ""))
 
-    # Step 5: Save processed data
-    print("\n[5/5] Saving processed data...")
+    # Step 6: Save processed data
+    print("\n[6/6] Saving processed data...")
     output_path = Path(__file__).parent / "output" / "processed_calendar_events.csv"
     save_processed_data(processed_events, output_path)
     print(f"  Saved to: {output_path}")

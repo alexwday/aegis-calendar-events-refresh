@@ -17,7 +17,8 @@ import csv
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+
+# from urllib.parse import quote  # Uncomment if proxy is needed
 
 from dotenv import load_dotenv
 from dateutil.parser import parse as dateutil_parse
@@ -57,20 +58,20 @@ def load_monitored_institutions():
 
 
 def configure_api_client():
-    """Configure the FactSet API client with proxy and authentication."""
-    # Build proxy URL with domain authentication
-    proxy_username = os.getenv("PROXY_USERNAME")
-    proxy_password = quote(os.getenv("PROXY_PASSWORD", ""))
-    proxy_domain = os.getenv("PROXY_DOMAIN", "MAPLE")
-    proxy_host = os.getenv("PROXY_HOST")
-
-    escaped_domain = quote(proxy_domain + "\\" + proxy_username)
-    proxy_url = f"http://{escaped_domain}:{proxy_password}@{proxy_host}"
+    """Configure the FactSet API client with authentication."""
+    # Proxy configuration (commented out - may not be needed)
+    # Uncomment if running behind corporate proxy:
+    # proxy_username = os.getenv("PROXY_USERNAME")
+    # proxy_password = quote(os.getenv("PROXY_PASSWORD", ""))
+    # proxy_domain = os.getenv("PROXY_DOMAIN", "MAPLE")
+    # proxy_host = os.getenv("PROXY_HOST")
+    # escaped_domain = quote(proxy_domain + "\\" + proxy_username)
+    # proxy_url = f"http://{escaped_domain}:{proxy_password}@{proxy_host}"
 
     configuration = fds.sdk.EventsandTranscripts.Configuration(
         username=os.getenv("FACTSET_USERNAME"),
         password=os.getenv("FACTSET_PASSWORD"),
-        proxy=proxy_url,
+        # proxy=proxy_url,  # Uncomment if proxy is needed
     )
     configuration.get_basic_auth_token()
 
