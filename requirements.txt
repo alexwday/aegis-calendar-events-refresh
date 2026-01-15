@@ -1,0 +1,16 @@
+# AEGIS Calendar Events Refresh - Dependencies
+# =============================================
+
+# FactSet SDK - Version pinned for API compatibility (Stage 1)
+fds.sdk.EventsandTranscripts==1.1.1
+
+# Core dependencies
+python-dotenv      # Environment variable loading
+pyyaml             # YAML configuration parsing
+
+# Date/Time utilities (Stage 2)
+pytz               # Timezone handling
+python-dateutil    # Date parsing and manipulation
+
+# PostgreSQL (Stage 3 - uncomment when implementing)
+# psycopg2-binary  # PostgreSQL adapter
