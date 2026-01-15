@@ -35,6 +35,7 @@ from fds.sdk.EventsandTranscripts.models import (
 # RBC SSL certificates (only available in RBC environment)
 try:
     import rbc_security
+
     _RBC_SECURITY_AVAILABLE = True
 except ImportError:
     _RBC_SECURITY_AVAILABLE = False
@@ -46,11 +47,12 @@ load_dotenv(PROJECT_ROOT / ".env")
 # Configuration (hardcoded - change here if needed)
 PAST_MONTHS = 6
 FUTURE_MONTHS = 6
+MAX_DAYS_PER_QUERY = 89  # FactSet API has 90-day maximum date range limit
 
 
 def load_monitored_institutions():
     """Load monitored institutions from project root."""
-    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r") as f:
+    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -83,62 +85,60 @@ def calculate_date_range(past_months: int = 6, future_months: int = 6):
     return start_date, end_date
 
 
+def _build_date_ranges(start_date, end_date):
+    """Split date range into chunks respecting API limit."""
+    date_ranges = []
+    current = start_date
+    while current < end_date:
+        chunk_end = min(current + timedelta(days=MAX_DAYS_PER_QUERY), end_date)
+        date_ranges.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return date_ranges
+
+
+def _query_single_chunk(api_instance, tickers, chunk_start, chunk_end):
+    """Query API for a single date range chunk."""
+    request = CompanyEventRequest(
+        data=CompanyEventRequestData(
+            date_time=CompanyEventRequestDataDateTime(
+                start=dateutil_parse(f"{chunk_start}T00:00:00Z"),
+                end=dateutil_parse(f"{chunk_end}T23:59:59Z"),
+            ),
+            universe=CompanyEventRequestDataUniverse(
+                symbols=tickers,
+                type="Tickers",
+            ),
+        ),
+    )
+
+    try:
+        response = api_instance.get_company_event(request)
+        if response and hasattr(response, "data") and response.data:
+            events = [e.to_dict() for e in response.data if e.ticker in tickers]
+            print(f"    Found {len(events)} events")
+            return events
+        print("    No events found")
+        return []
+    except (ConnectionError, TimeoutError, ValueError, RuntimeError) as err:
+        print(f"    ERROR: {str(err)}")
+        return []
+
+
 def query_calendar_events(api_instance, tickers: list, start_date, end_date) -> list:
     """
     Query FactSet Calendar Events API.
     Returns RAW event data as list of dictionaries.
     """
-    # FactSet API has a 90-day maximum date range limit
-    MAX_DAYS_PER_QUERY = 89
-
-    date_ranges = []
-    current_start = start_date
-
-    while current_start < end_date:
-        current_end = min(current_start + timedelta(days=MAX_DAYS_PER_QUERY), end_date)
-        date_ranges.append((current_start, current_end))
-        current_start = current_end + timedelta(days=1)
-
+    date_ranges = _build_date_ranges(start_date, end_date)
     print(f"  Date range: {start_date} to {end_date}")
     print(f"  Split into {len(date_ranges)} chunks (API limit: 90 days each)")
 
     all_events = []
-
-    for range_num, (chunk_start, chunk_end) in enumerate(date_ranges, 1):
-        print(f"  Querying chunk {range_num}/{len(date_ranges)}: {chunk_start} to {chunk_end}...")
-
-        start_datetime = dateutil_parse(f"{chunk_start}T00:00:00Z")
-        end_datetime = dateutil_parse(f"{chunk_end}T23:59:59Z")
-
-        company_event_request = CompanyEventRequest(
-            data=CompanyEventRequestData(
-                date_time=CompanyEventRequestDataDateTime(
-                    start=start_datetime,
-                    end=end_datetime,
-                ),
-                universe=CompanyEventRequestDataUniverse(
-                    symbols=tickers,
-                    type="Tickers",
-                ),
-            ),
-        )
-
-        try:
-            response = api_instance.get_company_event(company_event_request)
-
-            if response and hasattr(response, "data") and response.data:
-                # Convert to raw dictionaries - NO transformations
-                chunk_events = [event.to_dict() for event in response.data]
-                # Filter to only monitored tickers
-                chunk_events = [e for e in chunk_events if e.get("ticker") in tickers]
-                print(f"    Found {len(chunk_events)} events")
-                all_events.extend(chunk_events)
-            else:
-                print(f"    No events found")
-
-        except Exception as e:
-            print(f"    ERROR: {str(e)}")
-            continue
+    total = len(date_ranges)
+    for i, (chunk_start, chunk_end) in enumerate(date_ranges, 1):
+        print(f"  Querying chunk {i}/{total}: {chunk_start} to {chunk_end}...")
+        chunk = _query_single_chunk(api_instance, tickers, chunk_start, chunk_end)
+        all_events.extend(chunk)
 
     return all_events
 

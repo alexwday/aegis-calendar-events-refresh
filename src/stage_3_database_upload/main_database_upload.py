@@ -91,7 +91,9 @@ def validate_required_fields(events: list, required_fields: list) -> list:
         for field in required_fields:
             value = event.get(field, "")
             if not value or str(value).strip() == "":
-                errors.append(f"Row {i+1}: Missing required field '{field}' for event_id={event.get('event_id', 'UNKNOWN')}")
+                event_id = event.get("event_id", "UNKNOWN")
+                msg = f"Row {i+1}: Missing '{field}' for event_id={event_id}"
+                errors.append(msg)
 
     return errors
 
@@ -134,7 +136,7 @@ def print_data_summary(events: list):
         print(f"      {it}: {count}")
 
 
-def upload_to_postgres(events: list) -> bool:
+def upload_to_postgres(_events: list) -> bool:
     """
     PLACEHOLDER: Upload events to PostgreSQL.
 
@@ -178,8 +180,9 @@ def upload_to_postgres(events: list) -> bool:
     """
     print("\n  PostgreSQL upload is not yet implemented.")
     print("  This is a placeholder for future development.")
-    print("\n  To implement, add PostgreSQL connection code to upload_to_postgres() function")
-    print("  and add psycopg2 to requirements.txt")
+    print("\n  To implement:")
+    print("    - Add PostgreSQL connection code to upload_to_postgres()")
+    print("    - Add psycopg2 to requirements.txt")
 
     return False
 
@@ -193,7 +196,12 @@ def main():
 
     # Step 1: Load processed data from Stage 2
     print("[1/4] Loading processed data from Stage 2...")
-    input_path = Path(__file__).parent.parent / "stage_2_data_processing" / "output" / "processed_calendar_events.csv"
+    input_path = (
+        Path(__file__).parent.parent
+        / "stage_2_data_processing"
+        / "output"
+        / "processed_calendar_events.csv"
+    )
 
     if not input_path.exists():
         print(f"  ERROR: Input file not found: {input_path}")
@@ -205,14 +213,14 @@ def main():
 
     # Step 2: Validate schema
     print("\n[2/4] Validating schema...")
-    is_valid, missing, extra = validate_schema(events, EXPECTED_SCHEMA)
+    _, missing, extra = validate_schema(events, EXPECTED_SCHEMA)
 
     if missing:
         print(f"  ERROR: Missing expected fields: {missing}")
         print("  Schema validation FAILED")
         return
-    else:
-        print("  Schema matches expected structure")
+
+    print("  Schema matches expected structure")
 
     if extra:
         print(f"  NOTE: Extra fields found (will be ignored): {extra}")
@@ -245,7 +253,7 @@ def main():
     else:
         print("STAGE 3 INCOMPLETE - Upload not implemented yet")
     print(f"  Events ready for upload: {len(events)}")
-    print(f"  Target table: aegis_calendar_events")
+    print("  Target table: aegis_calendar_events")
     print("=" * 60)
 
 

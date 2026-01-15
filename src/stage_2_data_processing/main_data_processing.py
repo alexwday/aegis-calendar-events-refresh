@@ -42,17 +42,17 @@ EARNINGS_PRIORITY = ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsR
 
 FIELD_MAPPING = {
     # Internal Name         : Source Name (from raw CSV)
-    "event_id":             "event_id",
-    "ticker":               "ticker",
-    "event_type":           "event_type",
-    "event_datetime_utc":   "event_date_time",      # API: event_date_time
-    "description":          "description",          # API: description (becomes event_headline)
-    "webcast_link":         "webcast_link",
-    "contact_name":         "contact_name",
-    "contact_phone":        "contact_phone",
-    "contact_email":        "contact_email",
-    "fiscal_year":          "fiscal_year",
-    "fiscal_period":        "fiscal_period",
+    "event_id": "event_id",
+    "ticker": "ticker",
+    "event_type": "event_type",
+    "event_datetime_utc": "event_date_time",  # API: event_date_time
+    "description": "description",  # API: description (becomes event_headline)
+    "webcast_link": "webcast_link",
+    "contact_name": "contact_name",
+    "contact_phone": "contact_phone",
+    "contact_email": "contact_email",
+    "fiscal_year": "fiscal_year",
+    "fiscal_period": "fiscal_period",
 }
 
 # =============================================================================
@@ -84,6 +84,7 @@ OUTPUT_SCHEMA = [
 # PROCESSING FUNCTIONS
 # =============================================================================
 
+
 def load_raw_data(input_path: Path) -> list:
     """Load raw CSV data from Stage 1."""
     with open(input_path, "r", encoding="utf-8") as f:
@@ -93,7 +94,7 @@ def load_raw_data(input_path: Path) -> list:
 
 def load_monitored_institutions() -> dict:
     """Load monitored institutions from project root."""
-    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r") as f:
+    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -120,24 +121,90 @@ def convert_to_local_time(utc_datetime_str: str) -> tuple:
 
         # Ensure it's UTC
         if dt.tzinfo is None:
-            dt = pytz.UTC.localize(dt)
+            dt = dt.replace(tzinfo=pytz.UTC)
 
         # Convert to local timezone
         local_tz = pytz.timezone(LOCAL_TIMEZONE)
         dt_local = dt.astimezone(local_tz)
 
+        # Validate timezone conversion
+        tz_abbr = dt_local.strftime("%Z")
+        if tz_abbr not in ("EST", "EDT"):
+            print(f"    WARNING: Unexpected timezone '{tz_abbr}' for {LOCAL_TIMEZONE}")
+
+        # Validate UTC offset is correct (-5 for EST, -4 for EDT)
+        offset_hours = dt_local.utcoffset().total_seconds() / 3600
+        if offset_hours not in (-5, -4):
+            print(f"    WARNING: Unexpected UTC offset {offset_hours}h for Toronto")
+
         # Format outputs
         utc_iso = dt.isoformat()
         local_iso = dt_local.isoformat()
         date_str = dt_local.strftime("%Y-%m-%d")
-        tz_abbr = dt_local.strftime("%Z")  # EST or EDT
         time_with_tz = dt_local.strftime(f"%H:%M {tz_abbr}")
 
         return (utc_iso, local_iso, date_str, time_with_tz)
 
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         print(f"    WARNING: Could not parse datetime '{utc_datetime_str}': {e}")
         return ("", "", "", "")
+
+
+def validate_datetime_conversions(events: list) -> bool:
+    """
+    Validate datetime conversions are correct.
+    Returns True if all validations pass, False otherwise.
+    """
+    issues = []
+
+    for event in events:
+        event_id = event.get("event_id", "unknown")
+        utc_str = event.get("event_date_time_utc", "")
+        local_str = event.get("event_date_time_local", "")
+        date_str = event.get("event_date", "")
+        time_str = event.get("event_time_local", "")
+
+        # Skip if no datetime data
+        if not utc_str:
+            continue
+
+        # Check all datetime fields are populated
+        if not all([local_str, date_str, time_str]):
+            issues.append(f"{event_id}: Missing datetime fields")
+            continue
+
+        # Parse and verify UTC vs local difference
+        try:
+            dt_utc = dateutil_parse(utc_str)
+            dt_local = dateutil_parse(local_str)
+
+            # Verify they represent the same instant in time
+            if dt_utc.timestamp() != dt_local.timestamp():
+                issues.append(f"{event_id}: UTC/local mismatch")
+
+            # Verify date string matches local datetime
+            expected_date = dt_local.strftime("%Y-%m-%d")
+            if date_str != expected_date:
+                issues.append(
+                    f"{event_id}: Date mismatch {date_str} vs {expected_date}"
+                )
+
+            # Verify time string has valid timezone
+            if not any(tz in time_str for tz in ["EST", "EDT"]):
+                issues.append(f"{event_id}: Missing timezone in '{time_str}'")
+
+        except (ValueError, TypeError) as e:
+            issues.append(f"{event_id}: Parse error - {e}")
+
+    if issues:
+        print(f"\n  Datetime validation found {len(issues)} issues:")
+        for issue in issues[:5]:  # Show first 5
+            print(f"    - {issue}")
+        if len(issues) > 5:
+            print(f"    ... and {len(issues) - 5} more")
+        return False
+
+    return True
 
 
 def build_contact_info(raw_event: dict) -> str:
@@ -170,7 +237,9 @@ def process_event(raw_event: dict, institutions: dict, timestamp: str) -> dict:
     institution = institutions.get(ticker, {})
 
     # Convert timezone
-    utc_iso, local_iso, date_str, time_with_tz = convert_to_local_time(event_datetime_utc)
+    utc_iso, local_iso, date_str, time_with_tz = convert_to_local_time(
+        event_datetime_utc
+    )
 
     # Build processed event matching OUTPUT_SCHEMA
     return {
@@ -231,12 +300,18 @@ def deduplicate_earnings_events(events: list) -> list:
 
     for key, group_events in event_groups.items():
         # Separate earnings from non-earnings
-        earnings_events = [e for e in group_events if e.get("event_type") in priority_lookup]
-        other_events = [e for e in group_events if e.get("event_type") not in priority_lookup]
+        earnings_events = [
+            e for e in group_events if e.get("event_type") in priority_lookup
+        ]
+        other_events = [
+            e for e in group_events if e.get("event_type") not in priority_lookup
+        ]
 
         if earnings_events:
             # Sort by priority and keep highest
-            earnings_events.sort(key=lambda e: priority_lookup.get(e.get("event_type"), 999))
+            earnings_events.sort(
+                key=lambda e: priority_lookup.get(e.get("event_type"), 999)
+            )
             deduplicated.append(earnings_events[0])
 
         deduplicated.extend(other_events)
@@ -260,6 +335,33 @@ def save_processed_data(events: list, output_path: Path) -> bool:
     return True
 
 
+def _get_input_path():
+    """Get the input path for raw data from Stage 1."""
+    return (
+        Path(__file__).parent.parent
+        / "stage_1_data_acquisition"
+        / "output"
+        / "raw_calendar_events.csv"
+    )
+
+
+def _print_stats(events):
+    """Print event type and institution type statistics."""
+    event_types = defaultdict(int)
+    institution_types = defaultdict(int)
+    for event in events:
+        event_types[event.get("event_type", "Unknown")] += 1
+        institution_types[event.get("institution_type", "Unknown")] += 1
+
+    print("\nEvent Types:")
+    for et, count in sorted(event_types.items(), key=lambda x: -x[1]):
+        print(f"  {et}: {count}")
+
+    print("\nInstitution Types:")
+    for it, count in sorted(institution_types.items(), key=lambda x: -x[1]):
+        print(f"  {it}: {count}")
+
+
 def main():
     """Main execution function for Stage 2: Data Processing."""
     print("=" * 60)
@@ -269,8 +371,7 @@ def main():
 
     # Step 1: Load raw data from Stage 1
     print("[1/5] Loading raw data from Stage 1...")
-    input_path = Path(__file__).parent.parent / "stage_1_data_acquisition" / "output" / "raw_calendar_events.csv"
-
+    input_path = _get_input_path()
     if not input_path.exists():
         print(f"  ERROR: Input file not found: {input_path}")
         print("  Please run Stage 1 first.")
@@ -287,18 +388,18 @@ def main():
     # Step 3: Process events
     print("\n[3/5] Processing events...")
     print(f"  Timezone: {LOCAL_TIMEZONE}")
-    print(f"  Field mapping:")
-    for internal, source in FIELD_MAPPING.items():
-        print(f"    {internal} <- {source}")
-
     timestamp = datetime.now(pytz.UTC).isoformat()
-    processed_events = []
-
-    for raw_event in raw_events:
-        processed = process_event(raw_event, institutions, timestamp)
-        processed_events.append(processed)
-
+    processed_events = [
+        process_event(raw, institutions, timestamp) for raw in raw_events
+    ]
     print(f"  Processed {len(processed_events)} events")
+
+    # Validate datetime conversions
+    print("\n  Validating datetime conversions...")
+    if validate_datetime_conversions(processed_events):
+        print("  Datetime validation: PASSED")
+    else:
+        print("  Datetime validation: ISSUES FOUND (see above)")
 
     # Step 4: Deduplicate earnings events
     print("\n[4/5] Deduplicating earnings events...")
@@ -317,31 +418,16 @@ def main():
     output_path = Path(__file__).parent / "output" / "processed_calendar_events.csv"
     save_processed_data(processed_events, output_path)
     print(f"  Saved to: {output_path}")
-    print(f"  Output schema: {', '.join(OUTPUT_SCHEMA)}")
 
     # Summary
     print()
     print("=" * 60)
     print("STAGE 2 COMPLETE")
-    print(f"  Events processed: {len(processed_events)}")
-    print(f"  Duplicates removed: {removed}")
+    print(f"  Events processed: {len(processed_events)}, Duplicates removed: {removed}")
     print(f"  Output: {output_path}")
     print("=" * 60)
 
-    # Stats
-    event_types = defaultdict(int)
-    institution_types = defaultdict(int)
-    for event in processed_events:
-        event_types[event.get("event_type", "Unknown")] += 1
-        institution_types[event.get("institution_type", "Unknown")] += 1
-
-    print("\nEvent Types:")
-    for et, count in sorted(event_types.items(), key=lambda x: -x[1]):
-        print(f"  {et}: {count}")
-
-    print("\nInstitution Types:")
-    for it, count in sorted(institution_types.items(), key=lambda x: -x[1]):
-        print(f"  {it}: {count}")
+    _print_stats(processed_events)
 
 
 if __name__ == "__main__":
