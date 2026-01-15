@@ -22,6 +22,9 @@ import yaml
 import pytz
 from dateutil.parser import parse as dateutil_parse
 
+# Project root (for loading config files)
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 # =============================================================================
 # CONFIGURATION (hardcoded - change here if needed)
 # =============================================================================
@@ -90,8 +93,7 @@ def load_raw_data(input_path: Path) -> list:
 
 def load_monitored_institutions() -> dict:
     """Load monitored institutions from project root."""
-    institutions_path = Path(__file__).parent.parent / "monitored_institutions.yaml"
-    with open(institutions_path, "r") as f:
+    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r") as f:
         return yaml.safe_load(f)
 
 

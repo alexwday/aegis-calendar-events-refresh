@@ -23,8 +23,6 @@ from dotenv import load_dotenv
 from dateutil.parser import parse as dateutil_parse
 import yaml
 
-from rbc_security import configure_ssl
-
 import fds.sdk.EventsandTranscripts
 from fds.sdk.EventsandTranscripts.api import calendar_events_api
 from fds.sdk.EventsandTranscripts.models import (
@@ -34,8 +32,16 @@ from fds.sdk.EventsandTranscripts.models import (
     CompanyEventRequestDataUniverse,
 )
 
-# Load environment variables from project root
-load_dotenv(Path(__file__).parent.parent / ".env")
+# RBC SSL certificates (only available in RBC environment)
+try:
+    import rbc_security
+    _RBC_SECURITY_AVAILABLE = True
+except ImportError:
+    _RBC_SECURITY_AVAILABLE = False
+
+# Project root (for loading .env and config files)
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 # Configuration (hardcoded - change here if needed)
 PAST_MONTHS = 6
@@ -44,8 +50,7 @@ FUTURE_MONTHS = 6
 
 def load_monitored_institutions():
     """Load monitored institutions from project root."""
-    institutions_path = Path(__file__).parent.parent / "monitored_institutions.yaml"
-    with open(institutions_path, "r") as f:
+    with open(PROJECT_ROOT / "monitored_institutions.yaml", "r") as f:
         return yaml.safe_load(f)
 
 
@@ -183,7 +188,11 @@ def main():
 
     # Step 2: Configure SSL and API client
     print("\n[2/4] Configuring API client...")
-    configure_ssl()
+    if _RBC_SECURITY_AVAILABLE:
+        rbc_security.enable_certs()
+        print("  RBC SSL certificates enabled")
+    else:
+        print("  rbc_security not available, skipping SSL setup")
     api_config = configure_api_client()
     print("  API client configured")
 
