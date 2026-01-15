@@ -31,12 +31,12 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # PostgreSQL configuration from environment
 DB_CONFIG = {
-    "host": os.getenv("POSTGRES_HOST", "localhost"),
-    "port": os.getenv("POSTGRES_PORT", "5432"),
-    "database": os.getenv("POSTGRES_DATABASE", "aegis"),
+    "host": os.getenv("POSTGRES_HOST"),
+    "port": os.getenv("POSTGRES_PORT"),
+    "database": os.getenv("POSTGRES_DATABASE"),
     "user": os.getenv("POSTGRES_USER"),
     "password": os.getenv("POSTGRES_PASSWORD"),
-    "table": os.getenv("POSTGRES_TABLE", "aegis_calendar_events"),
+    "table": os.getenv("POSTGRES_TABLE"),
 }
 
 # Expected schema columns
