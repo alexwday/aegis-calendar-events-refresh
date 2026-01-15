@@ -22,34 +22,8 @@ from stage_2_data_processing.data_processing import main as stage_2
 from stage_3_database_upload.database_upload import main as stage_3
 
 
-# Logging configuration with colors
-class ColorFormatter(logging.Formatter):
-    """Custom formatter with ANSI colors."""
-
-    COLORS = {
-        "DEBUG": "\033[36m",
-        "INFO": "\033[32m",
-        "WARNING": "\033[33m",
-        "ERROR": "\033[31m",
-        "CRITICAL": "\033[31;1m",
-    }
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-
-    def format(self, record):
-        color = self.COLORS.get(record.levelname, "")
-        record.levelname = f"{color}{record.levelname:7}{self.RESET}"
-        record.msg = f"{self.BOLD}{record.msg}{self.RESET}"
-        return super().format(record)
-
-
-handler = logging.StreamHandler()
-handler.setFormatter(
-    ColorFormatter("%(asctime)s │ %(levelname)s │ %(message)s", "%H:%M:%S")
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
-log.setLevel(logging.INFO)
-log.addHandler(handler)
 
 
 def main():
