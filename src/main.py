@@ -8,17 +8,14 @@ Runs all three stages in sequence:
   3. Database Upload  - Upload to PostgreSQL
 
 Usage:
-    python main.py              # Run all stages (full upload)
-    python main.py --dry-run    # Run stages 1-2, then dry-run stage 3
-    python main.py --skip-upload # Run stages 1-2 only, skip database upload
+    python src/main.py              # Run all stages (full upload)
+    python src/main.py --dry-run    # Run stages 1-2, then dry-run stage 3
+    python src/main.py --skip-upload # Run stages 1-2 only, skip database upload
 """
 
 import argparse
 import logging
 import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from stage_1_data_acquisition.data_acquisition import main as stage_1
 from stage_2_data_processing.data_processing import main as stage_2
