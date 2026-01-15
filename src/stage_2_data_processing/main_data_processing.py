@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Stage 2: Data Processing
-========================
-Reads raw data from Stage 1, cleanses and transforms it.
-
-Key Features:
-- Field mapping at the top for easy adaptation to different data sources
-- All transformations: enrichment, timezone conversion, deduplication
-- Output matches PostgreSQL schema exactly
-
-Input:  ../stage_1_data_acquisition/output/raw_calendar_events.csv
-Output: output/processed_calendar_events.csv
+Stage 2: Data Processing - Transforms raw calendar events from Stage 1 into a clean,
+deduplicated dataset ready for database upload. Key transformations include: enriching
+events with institution metadata, converting UTC timestamps to local Toronto time,
+filtering to approved event types, consolidating duplicate earnings events (keeping highest
+priority), and renaming event types for consistency. The output schema matches the
+PostgreSQL table structure exactly. Field mapping at the top allows easy adaptation when
+switching data sources from API to Snowflake.
 """
 
 import csv
+import logging
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -22,20 +19,21 @@ import yaml
 import pytz
 from dateutil.parser import parse as dateutil_parse
 
-# Project root (for loading config files)
+# Paths
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+INPUT_PATH = (
+    Path(__file__).parent.parent
+    / "stage_1_data_acquisition/output/raw_calendar_events.csv"
+)
+OUTPUT_PATH = Path(__file__).parent / "output" / "processed_calendar_events.csv"
 
-# =============================================================================
-# CONFIGURATION (hardcoded - change here if needed)
-# =============================================================================
-
+# Timezone for local time conversion
 LOCAL_TIMEZONE = "America/Toronto"
 
-# Event types to include (filter out any not in this list)
-# These are the FINAL output types after consolidation
+# Event types to include in final output
 INCLUDED_EVENT_TYPES = [
-    "Earnings",  # Consolidated from: Earnings, ConfirmedEarningsRelease, ProjectedEarningsRelease
-    "SalesRevenue",  # Consolidated from: SalesRevenueRelease, SalesRevenueCall
+    "Earnings",
+    "SalesRevenue",
     "Dividend",
     "Conference",
     "ShareholdersMeeting",
@@ -43,37 +41,24 @@ INCLUDED_EVENT_TYPES = [
     "SpecialSituation",
 ]
 
-# Deduplication rules: Multiple API event types → single output type
-# For each group: keep ONE event per ticker+fiscal_period (priority order, first=highest)
-# All events in the group get renamed to the consolidated type name
+# Deduplication: keep one event per ticker+fiscal_period, priority order (first=highest)
 DEDUP_RULES = {
-    "Earnings": [
-        "Earnings",  # Highest priority
-        "ConfirmedEarningsRelease",
-        "ProjectedEarningsRelease",  # Lowest priority
-    ],
+    "Earnings": ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"],
 }
 
-# Rename rules: Just rename event types (no deduplication, keep all events)
-# Maps source event type → target event type
+# Simple renames: source type -> target type (no deduplication)
 RENAME_RULES = {
     "SalesRevenueRelease": "SalesRevenue",
     "SalesRevenueCall": "SalesRevenue",
 }
 
-# =============================================================================
-# FIELD MAPPING - Update this when switching data sources (API → Snowflake)
-# =============================================================================
-# Maps from SOURCE field names (in raw CSV) to INTERNAL field names
-# When switching to Snowflake, just update the source field names on the right
-
+# Field mapping: internal name -> source CSV column name
 FIELD_MAPPING = {
-    # Internal Name         : Source Name (from raw CSV)
     "event_id": "event_id",
     "ticker": "ticker",
     "event_type": "event_type",
-    "event_datetime_utc": "event_date_time",  # API: event_date_time
-    "description": "description",  # API: description (becomes event_headline)
+    "event_datetime_utc": "event_date_time",
+    "description": "description",
     "webcast_link": "webcast_link",
     "contact_name": "contact_name",
     "contact_phone": "contact_phone",
@@ -82,12 +67,7 @@ FIELD_MAPPING = {
     "fiscal_period": "fiscal_period",
 }
 
-# =============================================================================
-# OUTPUT SCHEMA - Matches PostgreSQL table aegis_calendar_events
-# =============================================================================
-# These are the exact field names expected by the database
-# Do NOT change these unless you also update the database schema
-
+# Output CSV columns matching PostgreSQL schema
 OUTPUT_SCHEMA = [
     "event_id",
     "ticker",
@@ -107,420 +87,218 @@ OUTPUT_SCHEMA = [
     "data_fetched_timestamp",
 ]
 
-# =============================================================================
-# PROCESSING FUNCTIONS
-# =============================================================================
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 
-def load_raw_data(input_path: Path) -> list:
-    """Load raw CSV data from Stage 1."""
-    with open(input_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
+def load_raw_events(path):
+    """Load raw CSV events from Stage 1."""
+    with open(path, "r", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
-def load_monitored_institutions() -> dict:
-    """Load monitored institutions from project root."""
+def load_institutions():
+    """Load institution metadata from YAML config."""
     with open(PROJECT_ROOT / "monitored_institutions.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def get_mapped_value(raw_event: dict, internal_field: str, default=""):
-    """
-    Get a value from raw event using the field mapping.
-    This abstraction makes it easy to switch data sources.
-    """
-    source_field = FIELD_MAPPING.get(internal_field, internal_field)
-    return raw_event.get(source_field, default) or default
+def get_field(event, field, default=""):
+    """Get mapped field value from raw event."""
+    return event.get(FIELD_MAPPING.get(field, field), default) or default
 
 
-def convert_to_local_time(utc_datetime_str: str) -> tuple:
-    """
-    Convert UTC datetime string to local time.
-    Returns: (utc_iso, local_iso, date_str, time_with_tz)
-    """
-    if not utc_datetime_str:
+def convert_timezone(utc_str):
+    """Convert UTC datetime string to local time, returns (utc_iso, local_iso, date, time)."""
+    if not utc_str:
         return ("", "", "", "")
-
     try:
-        # Parse the datetime
-        dt = dateutil_parse(str(utc_datetime_str))
-
-        # Ensure it's UTC
+        dt = dateutil_parse(str(utc_str))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=pytz.UTC)
-
-        # Convert to local timezone
-        local_tz = pytz.timezone(LOCAL_TIMEZONE)
-        dt_local = dt.astimezone(local_tz)
-
-        # Validate timezone conversion
+        dt_local = dt.astimezone(pytz.timezone(LOCAL_TIMEZONE))
         tz_abbr = dt_local.strftime("%Z")
         if tz_abbr not in ("EST", "EDT"):
-            print(f"    WARNING: Unexpected timezone '{tz_abbr}' for {LOCAL_TIMEZONE}")
-
-        # Validate UTC offset is correct (-5 for EST, -4 for EDT)
-        offset_hours = dt_local.utcoffset().total_seconds() / 3600
-        if offset_hours not in (-5, -4):
-            print(f"    WARNING: Unexpected UTC offset {offset_hours}h for Toronto")
-
-        # Format outputs
-        utc_iso = dt.isoformat()
-        local_iso = dt_local.isoformat()
-        date_str = dt_local.strftime("%Y-%m-%d")
-        time_with_tz = dt_local.strftime(f"%H:%M {tz_abbr}")
-
-        return (utc_iso, local_iso, date_str, time_with_tz)
-
+            log.warning("Unexpected timezone: %s", tz_abbr)
+        return (
+            dt.isoformat(),
+            dt_local.isoformat(),
+            dt_local.strftime("%Y-%m-%d"),
+            dt_local.strftime(f"%H:%M {tz_abbr}"),
+        )
     except (ValueError, TypeError, AttributeError) as e:
-        print(f"    WARNING: Could not parse datetime '{utc_datetime_str}': {e}")
+        log.warning("Failed to parse datetime '%s': %s", utc_str, e)
         return ("", "", "", "")
 
 
-def validate_datetime_conversions(events: list) -> bool:
-    """
-    Validate datetime conversions are correct.
-    Returns True if all validations pass, False otherwise.
-    """
-    issues = []
-
-    for event in events:
-        event_id = event.get("event_id", "unknown")
-        utc_str = event.get("event_date_time_utc", "")
-        local_str = event.get("event_date_time_local", "")
-        date_str = event.get("event_date", "")
-        time_str = event.get("event_time_local", "")
-
-        # Skip if no datetime data
-        if not utc_str:
-            continue
-
-        # Check all datetime fields are populated
-        if not all([local_str, date_str, time_str]):
-            issues.append(f"{event_id}: Missing datetime fields")
-            continue
-
-        # Parse and verify UTC vs local difference
-        try:
-            dt_utc = dateutil_parse(utc_str)
-            dt_local = dateutil_parse(local_str)
-
-            # Verify they represent the same instant in time
-            if dt_utc.timestamp() != dt_local.timestamp():
-                issues.append(f"{event_id}: UTC/local mismatch")
-
-            # Verify date string matches local datetime
-            expected_date = dt_local.strftime("%Y-%m-%d")
-            if date_str != expected_date:
-                issues.append(
-                    f"{event_id}: Date mismatch {date_str} vs {expected_date}"
-                )
-
-            # Verify time string has valid timezone
-            if not any(tz in time_str for tz in ["EST", "EDT"]):
-                issues.append(f"{event_id}: Missing timezone in '{time_str}'")
-
-        except (ValueError, TypeError) as e:
-            issues.append(f"{event_id}: Parse error - {e}")
-
-    if issues:
-        print(f"\n  Datetime validation found {len(issues)} issues:")
-        for issue in issues[:5]:  # Show first 5
-            print(f"    - {issue}")
-        if len(issues) > 5:
-            print(f"    ... and {len(issues) - 5} more")
-        return False
-
-    return True
-
-
-def _get_allowed_source_types():
-    """
-    Build set of allowed source event types from config.
-    Includes direct types, dedup source types, and rename source types.
-    """
-    allowed = set(INCLUDED_EVENT_TYPES)
-    # Add source types from deduplication rules
-    for source_types in DEDUP_RULES.values():
-        allowed.update(source_types)
-    # Add source types from rename rules
-    allowed.update(RENAME_RULES.keys())
-    return allowed
-
-
-def filter_event_types(events: list) -> list:
-    """
-    Filter events to only include approved event types.
-    Recognizes both final types and source types that will be consolidated.
-    Logs warnings for any unknown event types that are filtered out.
-    """
-    allowed_types = _get_allowed_source_types()
-    filtered = []
-    excluded_types = defaultdict(int)
-
-    for event in events:
-        event_type = event.get("event_type", "")
-        if event_type in allowed_types:
-            filtered.append(event)
-        else:
-            excluded_types[event_type] += 1
-
-    # Log warnings for unknown event types
-    if excluded_types:
-        print("\n  WARNING: Unknown event types filtered out:")
-        for event_type, count in sorted(excluded_types.items(), key=lambda x: -x[1]):
-            print(f"    - '{event_type}': {count} events")
-        print("  To include, add to INCLUDED_EVENT_TYPES or CONSOLIDATION_RULES")
-
-    return filtered
-
-
-def build_contact_info(raw_event: dict) -> str:
-    """Build contact info string from separate fields."""
+def build_contact_info(event):
+    """Combine contact fields into single string."""
     parts = []
-
-    contact_name = get_mapped_value(raw_event, "contact_name")
-    contact_phone = get_mapped_value(raw_event, "contact_phone")
-    contact_email = get_mapped_value(raw_event, "contact_email")
-
-    if contact_name:
-        parts.append(f"Contact: {contact_name}")
-    if contact_phone:
-        parts.append(f"Phone: {contact_phone}")
-    if contact_email:
-        parts.append(f"Email: {contact_email}")
-
+    if name := get_field(event, "contact_name"):
+        parts.append(f"Contact: {name}")
+    if phone := get_field(event, "contact_phone"):
+        parts.append(f"Phone: {phone}")
+    if email := get_field(event, "contact_email"):
+        parts.append(f"Email: {email}")
     return " | ".join(parts)
 
 
-def process_event(raw_event: dict, institutions: dict, timestamp: str) -> dict:
-    """
-    Process a single raw event into the output schema format.
-    """
-    # Get mapped values
-    ticker = get_mapped_value(raw_event, "ticker")
-    event_datetime_utc = get_mapped_value(raw_event, "event_datetime_utc")
-
-    # Get institution metadata
-    institution = institutions.get(ticker, {})
-
-    # Convert timezone
-    utc_iso, local_iso, date_str, time_with_tz = convert_to_local_time(
-        event_datetime_utc
-    )
-
-    # Build processed event matching OUTPUT_SCHEMA
+def transform_event(raw, institutions, timestamp):
+    """Transform raw event to output schema format."""
+    ticker = get_field(raw, "ticker")
+    inst = institutions.get(ticker, {})
+    utc, local, date, time = convert_timezone(get_field(raw, "event_datetime_utc"))
     return {
-        "event_id": get_mapped_value(raw_event, "event_id"),
+        "event_id": get_field(raw, "event_id"),
         "ticker": ticker,
-        "institution_name": institution.get("name", "Unknown"),
-        "institution_id": institution.get("id", ""),
-        "institution_type": institution.get("type", "Unknown"),
-        "event_type": get_mapped_value(raw_event, "event_type"),
-        "event_headline": get_mapped_value(raw_event, "description"),
-        "event_date_time_utc": utc_iso,
-        "event_date_time_local": local_iso,
-        "event_date": date_str,
-        "event_time_local": time_with_tz,
-        "webcast_link": get_mapped_value(raw_event, "webcast_link"),
-        "contact_info": build_contact_info(raw_event),
-        "fiscal_year": get_mapped_value(raw_event, "fiscal_year"),
-        "fiscal_period": get_mapped_value(raw_event, "fiscal_period"),
+        "institution_name": inst.get("name", "Unknown"),
+        "institution_id": inst.get("id", ""),
+        "institution_type": inst.get("type", "Unknown"),
+        "event_type": get_field(raw, "event_type"),
+        "event_headline": get_field(raw, "description"),
+        "event_date_time_utc": utc,
+        "event_date_time_local": local,
+        "event_date": date,
+        "event_time_local": time,
+        "webcast_link": get_field(raw, "webcast_link"),
+        "contact_info": build_contact_info(raw),
+        "fiscal_year": get_field(raw, "fiscal_year"),
+        "fiscal_period": get_field(raw, "fiscal_period"),
         "data_fetched_timestamp": timestamp,
     }
 
 
-def _build_dedup_lookup():
-    """Build lookup: source_type -> (target_name, priority)."""
+def get_allowed_types():
+    """Build set of all allowed source event types."""
+    allowed = set(INCLUDED_EVENT_TYPES)
+    for types in DEDUP_RULES.values():
+        allowed.update(types)
+    allowed.update(RENAME_RULES.keys())
+    return allowed
+
+
+def filter_events(events):
+    """Filter to approved event types, log unknown types."""
+    allowed = get_allowed_types()
+    filtered, excluded = [], defaultdict(int)
+    for event in events:
+        etype = event.get("event_type", "")
+        if etype in allowed:
+            filtered.append(event)
+        else:
+            excluded[etype] += 1
+    if excluded:
+        log.warning("Filtered unknown types: %s", dict(excluded))
+    return filtered
+
+
+def build_dedup_lookup():
+    """Build lookup mapping source types to (target, priority)."""
     lookup = {}
-    for target_name, source_types in DEDUP_RULES.items():
-        for priority, source_type in enumerate(source_types):
-            lookup[source_type] = (target_name, priority)
+    for target, sources in DEDUP_RULES.items():
+        for priority, source in enumerate(sources):
+            lookup[source] = (target, priority)
     return lookup
 
 
-def _get_dedup_key(event, target_name):
+def get_dedup_key(event, target):
     """Get grouping key for deduplication."""
     ticker = event.get("ticker", "")
-    fiscal_year = event.get("fiscal_year", "")
-    fiscal_period = event.get("fiscal_period", "")
-
-    if fiscal_year and fiscal_period:
-        return (target_name, ticker, fiscal_year, fiscal_period)
-    # Fallback to date if no fiscal period
-    return (target_name, ticker, "date", event.get("event_date", ""))
+    fy, fp = event.get("fiscal_year", ""), event.get("fiscal_period", "")
+    if fy and fp:
+        return (target, ticker, fy, fp)
+    return (target, ticker, "date", event.get("event_date", ""))
 
 
-def _apply_rename_rules(events):
-    """Apply RENAME_RULES to events (no deduplication)."""
-    result = []
+def consolidate_events(events):
+    """Apply deduplication and rename rules."""
+    dedup_lookup = build_dedup_lookup()
+    groups, other = defaultdict(list), []
+
     for event in events:
-        event_type = event.get("event_type", "")
-        if event_type in RENAME_RULES:
-            event_copy = event.copy()
-            event_copy["event_type"] = RENAME_RULES[event_type]
-            result.append(event_copy)
+        etype = event.get("event_type", "")
+        if etype in dedup_lookup:
+            target, _ = dedup_lookup[etype]
+            groups[get_dedup_key(event, target)].append(event)
         else:
-            result.append(event)
+            other.append(event)
+
+    result = []
+    for key, group in groups.items():
+        group.sort(key=lambda e: dedup_lookup.get(e.get("event_type"), ("", 999))[1])
+        winner = group[0].copy()
+        winner["event_type"] = key[0]
+        result.append(winner)
+
+    for event in other:
+        if event.get("event_type", "") in RENAME_RULES:
+            event = event.copy()
+            event["event_type"] = RENAME_RULES[event["event_type"]]
+        result.append(event)
+
     return result
 
 
-def consolidate_events(events: list) -> list:
-    """
-    Consolidate events using DEDUP_RULES and RENAME_RULES.
-
-    RENAME_RULES: Simple type rename, keep all events
-    DEDUP_RULES: Deduplicate by ticker+fiscal_period AND rename to target type
-    """
-    dedup_lookup = _build_dedup_lookup()
-
-    # Separate events into dedup groups vs other events
-    dedup_groups = defaultdict(list)
-    other_events = []
-
-    for event in events:
-        event_type = event.get("event_type", "")
-        if event_type in dedup_lookup:
-            target_name, _ = dedup_lookup[event_type]
-            key = _get_dedup_key(event, target_name)
-            dedup_groups[key].append(event)
-        else:
-            other_events.append(event)
-
-    # Process dedup groups: keep highest priority, rename type
-    deduplicated = []
-    for key, group_events in dedup_groups.items():
-        group_events.sort(
-            key=lambda e: dedup_lookup.get(e.get("event_type"), ("", 999))[1]
-        )
-        winner = group_events[0].copy()
-        winner["event_type"] = key[0]  # target_name is first element of key
-        deduplicated.append(winner)
-
-    return deduplicated + _apply_rename_rules(other_events)
-
-
-def save_processed_data(events: list, output_path: Path) -> bool:
-    """Save processed events to CSV matching OUTPUT_SCHEMA."""
+def save_events(events, path):
+    """Save processed events to CSV."""
     if not events:
-        print("  WARNING: No events to save")
+        log.warning("No events to save")
         return False
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_SCHEMA)
         writer.writeheader()
         writer.writerows(events)
-
     return True
 
 
-def _get_input_path():
-    """Get the input path for raw data from Stage 1."""
-    return (
-        Path(__file__).parent.parent
-        / "stage_1_data_acquisition"
-        / "output"
-        / "raw_calendar_events.csv"
-    )
-
-
-def _print_stats(events):
-    """Print event type and institution type statistics."""
-    event_types = defaultdict(int)
-    institution_types = defaultdict(int)
-    for event in events:
-        event_types[event.get("event_type", "Unknown")] += 1
-        institution_types[event.get("institution_type", "Unknown")] += 1
-
-    print("\nEvent Types:")
-    for et, count in sorted(event_types.items(), key=lambda x: -x[1]):
-        print(f"  {et}: {count}")
-
-    print("\nInstitution Types:")
-    for it, count in sorted(institution_types.items(), key=lambda x: -x[1]):
-        print(f"  {it}: {count}")
-
-
-def _print_summary(events, removed, output_path):
-    """Print final summary and statistics."""
-    print()
-    print("=" * 60)
-    print("STAGE 2 COMPLETE")
-    print(f"  Events processed: {len(events)}, Duplicates removed: {removed}")
-    print(f"  Output: {output_path}")
-    print("=" * 60)
-    _print_stats(events)
+def log_summary(events):
+    """Log event type and institution type counts."""
+    etypes, itypes = defaultdict(int), defaultdict(int)
+    for e in events:
+        etypes[e.get("event_type", "Unknown")] += 1
+        itypes[e.get("institution_type", "Unknown")] += 1
+    log.info("Event types: %s", dict(sorted(etypes.items(), key=lambda x: -x[1])))
+    log.info("Institution types: %s", dict(sorted(itypes.items(), key=lambda x: -x[1])))
 
 
 def main():
-    """Main execution function for Stage 2: Data Processing."""
-    print("=" * 60)
-    print("STAGE 2: DATA PROCESSING")
-    print("=" * 60)
-    print()
+    """Execute Stage 2 data processing pipeline."""
+    log.info("STAGE 2: DATA PROCESSING")
 
-    # Step 1: Load raw data from Stage 1
-    print("[1/6] Loading raw data from Stage 1...")
-    input_path = _get_input_path()
-    if not input_path.exists():
-        print(f"  ERROR: Input file not found: {input_path}")
-        print("  Please run Stage 1 first.")
+    if not INPUT_PATH.exists():
+        log.error("Input not found: %s - run Stage 1 first", INPUT_PATH)
         return
 
-    raw_events = load_raw_data(input_path)
-    print(f"  Loaded {len(raw_events)} raw events")
+    raw_events = load_raw_events(INPUT_PATH)
+    institutions = load_institutions()
+    log.info(
+        "Loaded %d raw events, %d institutions", len(raw_events), len(institutions)
+    )
 
-    # Step 2: Load institution metadata
-    print("\n[2/6] Loading institution metadata...")
-    institutions = load_monitored_institutions()
-    print(f"  Loaded {len(institutions)} institutions")
-
-    # Step 3: Process events
-    print("\n[3/6] Processing events...")
-    print(f"  Timezone: {LOCAL_TIMEZONE}")
     timestamp = datetime.now(pytz.UTC).isoformat()
-    processed_events = [
-        process_event(raw, institutions, timestamp) for raw in raw_events
-    ]
-    print(f"  Processed {len(processed_events)} events")
+    events = [transform_event(raw, institutions, timestamp) for raw in raw_events]
 
-    # Validate datetime conversions
-    print("\n  Validating datetime conversions...")
-    if validate_datetime_conversions(processed_events):
-        print("  Datetime validation: PASSED")
-    else:
-        print("  Datetime validation: ISSUES FOUND (see above)")
+    events = filter_events(events)
+    log.info("After filtering: %d events", len(events))
 
-    # Step 4: Filter event types
-    print("\n[4/6] Filtering event types...")
-    print(f"  Included types: {len(INCLUDED_EVENT_TYPES)}")
-    before_filter = len(processed_events)
-    processed_events = filter_event_types(processed_events)
-    filtered_count = before_filter - len(processed_events)
-    print(f"  Kept: {len(processed_events)}, Filtered out: {filtered_count}")
+    before = len(events)
+    events = consolidate_events(events)
+    log.info(
+        "After consolidation: %d events (removed %d duplicates)",
+        len(events),
+        before - len(events),
+    )
 
-    # Step 5: Consolidate events (deduplicate + rename types)
-    print("\n[5/6] Consolidating events...")
-    print(f"  Dedup rules: {list(DEDUP_RULES.keys())}")
-    print(f"  Rename rules: {list(RENAME_RULES.keys())}")
-    before_count = len(processed_events)
-    processed_events = consolidate_events(processed_events)
-    after_count = len(processed_events)
-    removed = before_count - after_count
-    print(f"  Before: {before_count}, After: {after_count}, Removed: {removed}")
-
-    # Sort by event date
-    processed_events.sort(key=lambda x: x.get("event_date_time_utc", ""))
-
-    # Step 6: Save processed data
-    print("\n[6/6] Saving processed data...")
-    output_path = Path(__file__).parent / "output" / "processed_calendar_events.csv"
-    save_processed_data(processed_events, output_path)
-    print(f"  Saved to: {output_path}")
-
-    _print_summary(processed_events, removed, output_path)
+    events.sort(key=lambda x: x.get("event_date_time_utc", ""))
+    save_events(events, OUTPUT_PATH)
+    log.info("Saved to %s", OUTPUT_PATH)
+    log_summary(events)
 
 
 if __name__ == "__main__":
