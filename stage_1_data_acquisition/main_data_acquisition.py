@@ -14,6 +14,7 @@ Output: output/raw_calendar_events.csv
 
 import os
 import csv
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -246,6 +247,17 @@ def main():
     print(f"  Events: {len(events)}")
     print(f"  Output: {output_path}")
     print("=" * 60)
+
+    # Event type breakdown - useful for knowing what types are available
+    if events:
+        event_type_counts = defaultdict(int)
+        for event in events:
+            et = event.get("event_type", "Unknown")
+            event_type_counts[et] += 1
+
+        print("\nEvent Types Found (for reference - add to config if needed):")
+        for et, count in sorted(event_type_counts.items(), key=lambda x: -x[1]):
+            print(f"  {et}: {count}")
 
 
 if __name__ == "__main__":
