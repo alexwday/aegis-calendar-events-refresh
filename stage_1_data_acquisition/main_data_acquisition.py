@@ -52,17 +52,17 @@ def load_monitored_institutions():
 def configure_api_client():
     """Configure the FactSet API client with proxy and authentication."""
     # Build proxy URL with domain authentication
-    proxy_user = os.getenv("PROXY_USER")
+    proxy_username = os.getenv("PROXY_USERNAME")
     proxy_password = quote(os.getenv("PROXY_PASSWORD", ""))
     proxy_domain = os.getenv("PROXY_DOMAIN", "MAPLE")
-    proxy_url_base = os.getenv("PROXY_URL")
+    proxy_host = os.getenv("PROXY_HOST")
 
-    escaped_domain = quote(proxy_domain + "\\" + proxy_user)
-    proxy_url = f"http://{escaped_domain}:{proxy_password}@{proxy_url_base}"
+    escaped_domain = quote(proxy_domain + "\\" + proxy_username)
+    proxy_url = f"http://{escaped_domain}:{proxy_password}@{proxy_host}"
 
     configuration = fds.sdk.EventsandTranscripts.Configuration(
-        username=os.getenv("API_USERNAME"),
-        password=os.getenv("API_PASSWORD"),
+        username=os.getenv("FACTSET_USERNAME"),
+        password=os.getenv("FACTSET_PASSWORD"),
         proxy=proxy_url,
     )
     configuration.get_basic_auth_token()
