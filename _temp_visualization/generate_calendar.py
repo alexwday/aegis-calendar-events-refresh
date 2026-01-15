@@ -7,7 +7,7 @@ HTML calendar. This script does NO data processing - it only handles display/UI.
 
 Data processing (deduplication, enrichment, etc.) is handled by Stage 2.
 
-Input:  ../stage_2_data_processing/output/processed_calendar_events.csv
+Input:  ../src/stage_2_data_processing/output/processed_calendar_events.csv
 Output: output/calendar.html
 """
 
@@ -35,14 +35,10 @@ def convert_to_fullcalendar_format(events):
     # Define color mapping for event types
     event_type_colors = {
         "Earnings": "#2563eb",  # Blue
-        "ConfirmedEarningsRelease": "#1d4ed8",  # Dark blue
-        "ProjectedEarningsRelease": "#60a5fa",  # Light blue
         "Dividend": "#059669",  # Green
         "Conference": "#d97706",  # Orange
         "ShareholdersMeeting": "#7c3aed",  # Purple
-        "SalesRevenueCall": "#dc2626",  # Red
-        "SalesRevenueMeeting": "#e11d48",  # Pink-red
-        "SalesRevenueRelease": "#be185d",  # Pink
+        "SalesRevenue": "#dc2626",  # Red
         "AnalystsInvestorsMeeting": "#0891b2",  # Cyan
         "SpecialSituation": "#ea580c",  # Dark orange
     }
@@ -946,6 +942,7 @@ def main():
     # Try Stage 2 output first, fall back to sample data
     stage_2_csv = (
         project_root
+        / "src"
         / "stage_2_data_processing"
         / "output"
         / "processed_calendar_events.csv"
