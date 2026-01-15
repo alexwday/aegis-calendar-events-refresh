@@ -170,6 +170,13 @@ def build_contact_info(event):
     return " | ".join(parts)
 
 
+def normalize_fiscal_year(value):
+    """Convert fiscal_year 0 to blank."""
+    if value in ("0", 0, "0.0"):
+        return ""
+    return str(value) if value else ""
+
+
 def transform_event(raw, institutions, timestamp):
     """Transform raw event to output schema format."""
     ticker = get_field(raw, "ticker")
@@ -189,7 +196,7 @@ def transform_event(raw, institutions, timestamp):
         "event_time_local": time,
         "webcast_link": get_field(raw, "webcast_link"),
         "contact_info": build_contact_info(raw),
-        "fiscal_year": get_field(raw, "fiscal_year"),
+        "fiscal_year": normalize_fiscal_year(get_field(raw, "fiscal_year")),
         "fiscal_period": get_field(raw, "fiscal_period"),
         "data_fetched_timestamp": timestamp,
     }
