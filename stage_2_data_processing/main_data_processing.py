@@ -266,7 +266,7 @@ def main():
 
     # Step 1: Load configuration
     print("[1/6] Loading configuration...")
-    config = load_config()
+    config = load_config().get("stage_2", {})
     local_timezone = config.get("local_timezone", "America/Toronto")
     earnings_priority = config.get("earnings_priority", ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"])
     print(f"  Local timezone: {local_timezone}")

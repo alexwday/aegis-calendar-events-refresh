@@ -199,7 +199,7 @@ def main():
 
     # Step 1: Load configuration
     print("[1/6] Loading configuration...")
-    config = load_config()
+    config = load_config().get("stage_1", {})
     date_range = config.get("date_range", {})
     past_months = date_range.get("past_months", 6)
     future_months = date_range.get("future_months", 6)

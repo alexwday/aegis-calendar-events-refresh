@@ -1,18 +1,20 @@
 # Calendar Events Pipeline Configuration
 
-# SSL certificate for API calls (relative to project root)
-ssl_cert_path: "config/rbc-ca-bundle.cer"
+# Stage 1: Data Acquisition
+stage_1:
+  ssl_cert_path: "config/rbc-ca-bundle.cer"
+  date_range:
+    past_months: 6
+    future_months: 6
 
-# Date range for events query
-date_range:
-  past_months: 6
-  future_months: 6
+# Stage 2: Data Processing
+stage_2:
+  local_timezone: "America/Toronto"
+  earnings_priority:
+    - "Earnings"
+    - "ConfirmedEarningsRelease"
+    - "ProjectedEarningsRelease"
 
-# Timezone for local time display
-local_timezone: "America/Toronto"
-
-# Earnings event priority (first = highest, kept when duplicates exist)
-earnings_priority:
-  - "Earnings"
-  - "ConfirmedEarningsRelease"
-  - "ProjectedEarningsRelease"
+# Stage 3: Database Upload (placeholder)
+stage_3:
+  table_name: "aegis_calendar_events"
