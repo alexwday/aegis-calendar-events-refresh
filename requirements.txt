@@ -12,5 +12,6 @@ pyyaml             # YAML configuration parsing
 pytz               # Timezone handling
 python-dateutil    # Date parsing and manipulation
 
-# PostgreSQL (Stage 3 - uncomment when implementing)
-# psycopg2-binary  # PostgreSQL adapter
+# PostgreSQL (Stage 3)
+sqlalchemy         # Database ORM and connection
+psycopg2-binary    # PostgreSQL adapter
