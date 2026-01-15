@@ -267,9 +267,8 @@ def main():
     # Step 1: Load configuration
     print("[1/6] Loading configuration...")
     config = load_config()
-    processing_config = config.get("data_processing", {})
-    local_timezone = processing_config.get("local_timezone", "America/Toronto")
-    earnings_priority = processing_config.get("earnings_priority", ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"])
+    local_timezone = config.get("local_timezone", "America/Toronto")
+    earnings_priority = config.get("earnings_priority", ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"])
     print(f"  Local timezone: {local_timezone}")
     print(f"  Earnings priority: {earnings_priority}")
 

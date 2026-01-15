@@ -1,70 +1,18 @@
-# =============================================================================
-# AEGIS Calendar Events Refresh - Configuration
-# =============================================================================
-# This configuration controls the 3-stage calendar events pipeline:
-#   Stage 1: Data Acquisition (API query)
-#   Stage 2: Data Processing (transformation)
-#   Stage 3: Database Upload (PostgreSQL)
+# Calendar Events Pipeline Configuration
 
-# -----------------------------------------------------------------------------
-# SSL Certificate Configuration
-# -----------------------------------------------------------------------------
-# Path to SSL certificate for API calls
-# Can be absolute path or relative to project root
+# SSL certificate for API calls (relative to project root)
 ssl_cert_path: "config/rbc-ca-bundle.cer"
 
-# -----------------------------------------------------------------------------
-# Stage 1: Data Acquisition Configuration
-# -----------------------------------------------------------------------------
-data_acquisition:
-  description: "Query FactSet Calendar Events API for raw data"
+# Date range for events query
+date_range:
+  past_months: 6
+  future_months: 6
 
-  # Date range for API query
-  date_range:
-    past_months: 6      # Look back 6 months from today
-    future_months: 6    # Look ahead 6 months from today
-    # Note: Uses 30-day month approximation
+# Timezone for local time display
+local_timezone: "America/Toronto"
 
-  # Output location (relative to stage_1_data_acquisition/)
-  output_file: "output/raw_calendar_events.csv"
-
-# -----------------------------------------------------------------------------
-# Stage 2: Data Processing Configuration
-# -----------------------------------------------------------------------------
-data_processing:
-  description: "Process and cleanse raw calendar events data"
-
-  # Timezone for local time conversion
-  local_timezone: "America/Toronto"
-
-  # Earnings event deduplication priority
-  # First in list = highest priority (kept over others)
-  earnings_priority:
-    - "Earnings"
-    - "ConfirmedEarningsRelease"
-    - "ProjectedEarningsRelease"
-
-  # Output location (relative to stage_2_data_processing/)
-  output_file: "output/processed_calendar_events.csv"
-
-# -----------------------------------------------------------------------------
-# Stage 3: Database Upload Configuration
-# -----------------------------------------------------------------------------
-database_upload:
-  description: "Upload processed data to PostgreSQL"
-
-  # Target database table
-  table_name: "aegis_calendar_events"
-
-  # Upload strategy: "replace" (delete all, insert new) or "upsert" (update existing)
-  strategy: "replace"
-
-  # PostgreSQL connection (credentials in .env file)
-  # These are placeholder paths - actual values come from environment variables
-
-# -----------------------------------------------------------------------------
-# Notes
-# -----------------------------------------------------------------------------
-# - Monitored institutions are defined in monitored_institutions.yaml
-# - API credentials and database credentials are in .env file
-# - SSL certificate may need to be placed in config/ folder for local testing
+# Earnings event priority (first = highest, kept when duplicates exist)
+earnings_priority:
+  - "Earnings"
+  - "ConfirmedEarningsRelease"
+  - "ProjectedEarningsRelease"
