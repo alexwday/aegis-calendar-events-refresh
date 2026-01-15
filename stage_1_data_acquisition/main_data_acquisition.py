@@ -43,8 +43,8 @@ FUTURE_MONTHS = 6
 
 
 def load_monitored_institutions():
-    """Load monitored institutions from local config file."""
-    institutions_path = Path(__file__).parent.parent / "config" / "monitored_institutions.yaml"
+    """Load monitored institutions from project root."""
+    institutions_path = Path(__file__).parent.parent / "monitored_institutions.yaml"
     with open(institutions_path, "r") as f:
         return yaml.safe_load(f)
 

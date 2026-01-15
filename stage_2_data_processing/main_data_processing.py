@@ -89,8 +89,8 @@ def load_raw_data(input_path: Path) -> list:
 
 
 def load_monitored_institutions() -> dict:
-    """Load monitored institutions from config."""
-    institutions_path = Path(__file__).parent.parent / "config" / "monitored_institutions.yaml"
+    """Load monitored institutions from project root."""
+    institutions_path = Path(__file__).parent.parent / "monitored_institutions.yaml"
     with open(institutions_path, "r") as f:
         return yaml.safe_load(f)
 
