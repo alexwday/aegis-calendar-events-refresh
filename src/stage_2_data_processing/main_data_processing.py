@@ -32,22 +32,34 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 LOCAL_TIMEZONE = "America/Toronto"
 
 # Event types to include (filter out any not in this list)
-# Add new event types here as they are discovered and approved
+# These are the FINAL output types after consolidation
 INCLUDED_EVENT_TYPES = [
-    "Earnings",
-    "ConfirmedEarningsRelease",
-    "ProjectedEarningsRelease",
+    "Earnings",  # Consolidated from: Earnings, ConfirmedEarningsRelease, ProjectedEarningsRelease
+    "SalesRevenue",  # Consolidated from: SalesRevenueRelease, SalesRevenueCall
     "Dividend",
     "Conference",
     "ShareholdersMeeting",
-    "SalesRevenueRelease",
-    "SalesRevenueCall",
     "AnalystsInvestorsMeeting",
     "SpecialSituation",
 ]
 
-# Earnings event priority (first = highest, kept when duplicates exist)
-EARNINGS_PRIORITY = ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"]
+# Deduplication rules: Multiple API event types → single output type
+# For each group: keep ONE event per ticker+fiscal_period (priority order, first=highest)
+# All events in the group get renamed to the consolidated type name
+DEDUP_RULES = {
+    "Earnings": [
+        "Earnings",  # Highest priority
+        "ConfirmedEarningsRelease",
+        "ProjectedEarningsRelease",  # Lowest priority
+    ],
+}
+
+# Rename rules: Just rename event types (no deduplication, keep all events)
+# Maps source event type → target event type
+RENAME_RULES = {
+    "SalesRevenueRelease": "SalesRevenue",
+    "SalesRevenueCall": "SalesRevenue",
+}
 
 # =============================================================================
 # FIELD MAPPING - Update this when switching data sources (API → Snowflake)
@@ -222,17 +234,33 @@ def validate_datetime_conversions(events: list) -> bool:
     return True
 
 
+def _get_allowed_source_types():
+    """
+    Build set of allowed source event types from config.
+    Includes direct types, dedup source types, and rename source types.
+    """
+    allowed = set(INCLUDED_EVENT_TYPES)
+    # Add source types from deduplication rules
+    for source_types in DEDUP_RULES.values():
+        allowed.update(source_types)
+    # Add source types from rename rules
+    allowed.update(RENAME_RULES.keys())
+    return allowed
+
+
 def filter_event_types(events: list) -> list:
     """
     Filter events to only include approved event types.
+    Recognizes both final types and source types that will be consolidated.
     Logs warnings for any unknown event types that are filtered out.
     """
+    allowed_types = _get_allowed_source_types()
     filtered = []
     excluded_types = defaultdict(int)
 
     for event in events:
         event_type = event.get("event_type", "")
-        if event_type in INCLUDED_EVENT_TYPES:
+        if event_type in allowed_types:
             filtered.append(event)
         else:
             excluded_types[event_type] += 1
@@ -242,7 +270,7 @@ def filter_event_types(events: list) -> list:
         print("\n  WARNING: Unknown event types filtered out:")
         for event_type, count in sorted(excluded_types.items(), key=lambda x: -x[1]):
             print(f"    - '{event_type}': {count} events")
-        print("  To include these, add them to INCLUDED_EVENT_TYPES in config")
+        print("  To include, add to INCLUDED_EVENT_TYPES or CONSOLIDATION_RULES")
 
     return filtered
 
@@ -302,61 +330,74 @@ def process_event(raw_event: dict, institutions: dict, timestamp: str) -> dict:
     }
 
 
-def deduplicate_earnings_events(events: list) -> list:
-    """
-    Deduplicate earnings-related events for the same institution and fiscal period.
-    Priority order determined by EARNINGS_PRIORITY constant (first = highest priority).
-    """
-    # Build priority lookup
-    priority_lookup = {et: i for i, et in enumerate(EARNINGS_PRIORITY)}
+def _build_dedup_lookup():
+    """Build lookup: source_type -> (target_name, priority)."""
+    lookup = {}
+    for target_name, source_types in DEDUP_RULES.items():
+        for priority, source_type in enumerate(source_types):
+            lookup[source_type] = (target_name, priority)
+    return lookup
 
-    # Group events by ticker + fiscal period
-    event_groups = defaultdict(list)
+
+def _get_dedup_key(event, target_name):
+    """Get grouping key for deduplication."""
+    ticker = event.get("ticker", "")
+    fiscal_year = event.get("fiscal_year", "")
+    fiscal_period = event.get("fiscal_period", "")
+
+    if fiscal_year and fiscal_period:
+        return (target_name, ticker, fiscal_year, fiscal_period)
+    # Fallback to date if no fiscal period
+    return (target_name, ticker, "date", event.get("event_date", ""))
+
+
+def _apply_rename_rules(events):
+    """Apply RENAME_RULES to events (no deduplication)."""
+    result = []
+    for event in events:
+        event_type = event.get("event_type", "")
+        if event_type in RENAME_RULES:
+            event_copy = event.copy()
+            event_copy["event_type"] = RENAME_RULES[event_type]
+            result.append(event_copy)
+        else:
+            result.append(event)
+    return result
+
+
+def consolidate_events(events: list) -> list:
+    """
+    Consolidate events using DEDUP_RULES and RENAME_RULES.
+
+    RENAME_RULES: Simple type rename, keep all events
+    DEDUP_RULES: Deduplicate by ticker+fiscal_period AND rename to target type
+    """
+    dedup_lookup = _build_dedup_lookup()
+
+    # Separate events into dedup groups vs other events
+    dedup_groups = defaultdict(list)
+    other_events = []
 
     for event in events:
-        ticker = event.get("ticker", "")
-        fiscal_year = event.get("fiscal_year", "")
-        fiscal_period = event.get("fiscal_period", "")
         event_type = event.get("event_type", "")
-
-        # Determine grouping key
-        if event_type in priority_lookup:
-            # Earnings events: group by fiscal period
-            if fiscal_year and fiscal_period:
-                key = f"{ticker}|{fiscal_year}|{fiscal_period}"
-            else:
-                # Fallback to date if no fiscal period
-                event_date = event.get("event_date", "")
-                key = f"{ticker}|date|{event_date}"
+        if event_type in dedup_lookup:
+            target_name, _ = dedup_lookup[event_type]
+            key = _get_dedup_key(event, target_name)
+            dedup_groups[key].append(event)
         else:
-            # Non-earnings events: unique key (no deduplication)
-            event_id = event.get("event_id", "")
-            key = f"unique|{event_id}"
+            other_events.append(event)
 
-        event_groups[key].append(event)
-
-    # Deduplicate each group
+    # Process dedup groups: keep highest priority, rename type
     deduplicated = []
+    for key, group_events in dedup_groups.items():
+        group_events.sort(
+            key=lambda e: dedup_lookup.get(e.get("event_type"), ("", 999))[1]
+        )
+        winner = group_events[0].copy()
+        winner["event_type"] = key[0]  # target_name is first element of key
+        deduplicated.append(winner)
 
-    for key, group_events in event_groups.items():
-        # Separate earnings from non-earnings
-        earnings_events = [
-            e for e in group_events if e.get("event_type") in priority_lookup
-        ]
-        other_events = [
-            e for e in group_events if e.get("event_type") not in priority_lookup
-        ]
-
-        if earnings_events:
-            # Sort by priority and keep highest
-            earnings_events.sort(
-                key=lambda e: priority_lookup.get(e.get("event_type"), 999)
-            )
-            deduplicated.append(earnings_events[0])
-
-        deduplicated.extend(other_events)
-
-    return deduplicated
+    return deduplicated + _apply_rename_rules(other_events)
 
 
 def save_processed_data(events: list, output_path: Path) -> bool:
@@ -400,6 +441,17 @@ def _print_stats(events):
     print("\nInstitution Types:")
     for it, count in sorted(institution_types.items(), key=lambda x: -x[1]):
         print(f"  {it}: {count}")
+
+
+def _print_summary(events, removed, output_path):
+    """Print final summary and statistics."""
+    print()
+    print("=" * 60)
+    print("STAGE 2 COMPLETE")
+    print(f"  Events processed: {len(events)}, Duplicates removed: {removed}")
+    print(f"  Output: {output_path}")
+    print("=" * 60)
+    _print_stats(events)
 
 
 def main():
@@ -449,11 +501,12 @@ def main():
     filtered_count = before_filter - len(processed_events)
     print(f"  Kept: {len(processed_events)}, Filtered out: {filtered_count}")
 
-    # Step 5: Deduplicate earnings events
-    print("\n[5/6] Deduplicating earnings events...")
-    print(f"  Priority: {EARNINGS_PRIORITY}")
+    # Step 5: Consolidate events (deduplicate + rename types)
+    print("\n[5/6] Consolidating events...")
+    print(f"  Dedup rules: {list(DEDUP_RULES.keys())}")
+    print(f"  Rename rules: {list(RENAME_RULES.keys())}")
     before_count = len(processed_events)
-    processed_events = deduplicate_earnings_events(processed_events)
+    processed_events = consolidate_events(processed_events)
     after_count = len(processed_events)
     removed = before_count - after_count
     print(f"  Before: {before_count}, After: {after_count}, Removed: {removed}")
@@ -467,15 +520,7 @@ def main():
     save_processed_data(processed_events, output_path)
     print(f"  Saved to: {output_path}")
 
-    # Summary
-    print()
-    print("=" * 60)
-    print("STAGE 2 COMPLETE")
-    print(f"  Events processed: {len(processed_events)}, Duplicates removed: {removed}")
-    print(f"  Output: {output_path}")
-    print("=" * 60)
-
-    _print_stats(processed_events)
+    _print_summary(processed_events, removed, output_path)
 
 
 if __name__ == "__main__":
