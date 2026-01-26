@@ -13,6 +13,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from dateutil.parser import parse as dateutil_parse
@@ -57,12 +58,39 @@ def load_institutions():
         return yaml.safe_load(f)
 
 
+def build_proxy_url():
+    """Build proxy URL with NTLM domain authentication if proxy is configured."""
+    proxy_user = os.getenv("PROXY_USER")
+    proxy_password = os.getenv("PROXY_PASSWORD")
+    proxy_url_base = os.getenv("PROXY_URL")
+
+    if not all([proxy_user, proxy_password, proxy_url_base]):
+        return None
+
+    proxy_domain = os.getenv("PROXY_DOMAIN", "MAPLE")
+    escaped_domain = quote(proxy_domain + "\\" + proxy_user)
+    escaped_password = quote(proxy_password)
+    return f"http://{escaped_domain}:{escaped_password}@{proxy_url_base}"
+
+
 def create_api_client():
     """Create and configure FactSet API client."""
-    config = fds.sdk.EventsandTranscripts.Configuration(
-        username=os.getenv("FACTSET_USERNAME"),
-        password=os.getenv("FACTSET_PASSWORD"),
-    )
+    proxy_url = build_proxy_url()
+
+    if proxy_url:
+        log.info("Proxy configured")
+        config = fds.sdk.EventsandTranscripts.Configuration(
+            username=os.getenv("FACTSET_USERNAME"),
+            password=os.getenv("FACTSET_PASSWORD"),
+            proxy=proxy_url,
+        )
+    else:
+        log.info("No proxy configured (direct connection)")
+        config = fds.sdk.EventsandTranscripts.Configuration(
+            username=os.getenv("FACTSET_USERNAME"),
+            password=os.getenv("FACTSET_PASSWORD"),
+        )
+
     config.get_basic_auth_token()
     return config
 
