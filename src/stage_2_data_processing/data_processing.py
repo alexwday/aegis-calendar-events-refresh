@@ -33,7 +33,6 @@ LOCAL_TIMEZONE = "America/Toronto"
 # Event types to include in final output
 INCLUDED_EVENT_TYPES = [
     "Earnings",
-    "ConfirmedEarningsRelease",  # Will be renamed to Earnings
     "SalesRevenue",
     "Dividend",
     "Conference",
@@ -45,23 +44,20 @@ INCLUDED_EVENT_TYPES = [
 # Event types to EXCLUDE completely (filtered out before processing)
 EXCLUDED_EVENT_TYPES = [
     "ProjectedEarningsRelease",  # Projections are often inaccurate
+    "ConfirmedEarningsRelease",  # Only keep earnings calls, not release dates
 ]
 
 # Deduplication: keep one event per ticker+fiscal_period, priority order (first=highest)
-# NOTE: Removed earnings from here - we now keep both Earnings (call) and
-# ConfirmedEarningsRelease (release date) as separate events
 DEDUP_RULES = {}
 
 # Same-datetime deduplication: when events have IDENTICAL ticker + datetime,
 # keep only the highest priority type (first in list = highest priority)
-# This handles cases where both a call and release are scheduled at exact same time
-DATETIME_DEDUP_PRIORITY = ["Earnings", "ConfirmedEarningsRelease"]
+DATETIME_DEDUP_PRIORITY = []
 
 # Simple renames: source type -> target type (applied AFTER datetime dedup)
 RENAME_RULES = {
     "SalesRevenueRelease": "SalesRevenue",
     "SalesRevenueCall": "SalesRevenue",
-    "ConfirmedEarningsRelease": "Earnings",  # Rename to Earnings category
 }
 
 # Field mapping: internal name -> source CSV column name
@@ -206,19 +202,19 @@ def filter_events(events):
     allowed = get_allowed_types()
     filtered = []
     excluded_counts = defaultdict(int)
-    projected_count = 0
+    explicitly_excluded_counts = defaultdict(int)
 
     for event in events:
         etype = event.get("event_type", "")
         if etype in EXCLUDED_EVENT_TYPES:
-            projected_count += 1
+            explicitly_excluded_counts[etype] += 1
         elif etype in allowed:
             filtered.append(event)
         else:
             excluded_counts[etype] += 1
 
-    if projected_count:
-        log.info("Filtered out %d ProjectedEarningsRelease events", projected_count)
+    if explicitly_excluded_counts:
+        log.info("Filtered out excluded types: %s", dict(explicitly_excluded_counts))
     if excluded_counts:
         log.warning("Filtered unknown types: %s", dict(excluded_counts))
     return filtered

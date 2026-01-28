@@ -50,7 +50,7 @@ MAX_DAYS_PER_QUERY = 89
 # =============================================================================
 # Set to True to try alternate ticker formats for Canadian (-CA) tickers.
 # When enabled, for each -CA ticker (e.g., BMO-CA), the script will also
-# query the bare ticker (BMO) and US variant (BMO-US), then merge results.
+# query the US variant (BMO-US), then merge results preferring -CA source.
 # This helps catch events that may be stored under different ticker formats.
 EXPAND_CANADIAN_TICKERS = True
 # =============================================================================
@@ -64,7 +64,7 @@ log = logging.getLogger(__name__)
 
 def expand_canadian_tickers(tickers):
     """
-    For tickers ending in -CA, also add bare and -US variants to query.
+    For tickers ending in -CA, also add -US variant to query.
 
     Returns:
         tuple: (expanded_tickers, variant_to_canonical_map)
@@ -74,8 +74,8 @@ def expand_canadian_tickers(tickers):
     Example:
         Input: ["BMO-CA", "JPM-US"]
         Output: (
-            ["BMO-CA", "BMO", "BMO-US", "JPM-US"],
-            {"BMO-CA": "BMO-CA", "BMO": "BMO-CA", "BMO-US": "BMO-CA", "JPM-US": "JPM-US"}
+            ["BMO-CA", "BMO-US", "JPM-US"],
+            {"BMO-CA": "BMO-CA", "BMO-US": "BMO-CA", "JPM-US": "JPM-US"}
         )
     """
     expanded = []
@@ -88,9 +88,6 @@ def expand_canadian_tickers(tickers):
 
         if ticker.endswith("-CA"):
             base = ticker[:-3]
-            if base not in expanded:
-                expanded.append(base)
-            variant_map[base] = ticker
             us_variant = f"{base}-US"
             if us_variant not in expanded:
                 expanded.append(us_variant)
@@ -107,7 +104,7 @@ def merge_variant_events(events, variant_map):
     - Events are duplicates if same (canonical_ticker, event_type, fiscal_year, fiscal_period)
     - For events without fiscal info, use (canonical_ticker, event_type, event_date)
     - When duplicates found, prefer:
-        1. Canonical ticker source (e.g., BMO-CA over BMO)
+        1. Canonical ticker source (e.g., BMO-CA over BMO-US)
         2. More complete data (has webcast_link)
         3. Later event_date_time (more likely accurate/updated)
     """
@@ -268,7 +265,7 @@ def fetch_events(api, tickers, start_date, end_date):
                      len(ca_tickers), len(query_tickers) - len(tickers) + len(ca_tickers))
             for ca in ca_tickers[:3]:
                 base = ca[:-3]
-                log.info("  %s -> also trying: %s, %s-US", ca, base, base)
+                log.info("  %s -> also trying: %s-US", ca, base)
             if len(ca_tickers) > 3:
                 log.info("  ... and %d more", len(ca_tickers) - 3)
     else:
