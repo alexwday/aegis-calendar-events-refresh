@@ -33,6 +33,7 @@ LOCAL_TIMEZONE = "America/Toronto"
 # Event types to include in final output
 INCLUDED_EVENT_TYPES = [
     "Earnings",
+    "ConfirmedEarningsRelease",  # Will be renamed to Earnings
     "SalesRevenue",
     "Dividend",
     "Conference",
@@ -41,15 +42,26 @@ INCLUDED_EVENT_TYPES = [
     "SpecialSituation",
 ]
 
-# Deduplication: keep one event per ticker+fiscal_period, priority order (first=highest)
-DEDUP_RULES = {
-    "Earnings": ["Earnings", "ConfirmedEarningsRelease", "ProjectedEarningsRelease"],
-}
+# Event types to EXCLUDE completely (filtered out before processing)
+EXCLUDED_EVENT_TYPES = [
+    "ProjectedEarningsRelease",  # Projections are often inaccurate
+]
 
-# Simple renames: source type -> target type (no deduplication)
+# Deduplication: keep one event per ticker+fiscal_period, priority order (first=highest)
+# NOTE: Removed earnings from here - we now keep both Earnings (call) and
+# ConfirmedEarningsRelease (release date) as separate events
+DEDUP_RULES = {}
+
+# Same-datetime deduplication: when events have IDENTICAL ticker + datetime,
+# keep only the highest priority type (first in list = highest priority)
+# This handles cases where both a call and release are scheduled at exact same time
+DATETIME_DEDUP_PRIORITY = ["Earnings", "ConfirmedEarningsRelease"]
+
+# Simple renames: source type -> target type (applied AFTER datetime dedup)
 RENAME_RULES = {
     "SalesRevenueRelease": "SalesRevenue",
     "SalesRevenueCall": "SalesRevenue",
+    "ConfirmedEarningsRelease": "Earnings",  # Rename to Earnings category
 }
 
 # Field mapping: internal name -> source CSV column name
@@ -184,22 +196,84 @@ def get_allowed_types():
     for types in DEDUP_RULES.values():
         allowed.update(types)
     allowed.update(RENAME_RULES.keys())
+    # Remove explicitly excluded types
+    allowed -= set(EXCLUDED_EVENT_TYPES)
     return allowed
 
 
 def filter_events(events):
-    """Filter to approved event types, log unknown types."""
+    """Filter to approved event types, excluding banned types."""
     allowed = get_allowed_types()
-    filtered, excluded = [], defaultdict(int)
+    filtered = []
+    excluded_counts = defaultdict(int)
+    projected_count = 0
+
     for event in events:
         etype = event.get("event_type", "")
-        if etype in allowed:
+        if etype in EXCLUDED_EVENT_TYPES:
+            projected_count += 1
+        elif etype in allowed:
             filtered.append(event)
         else:
-            excluded[etype] += 1
-    if excluded:
-        log.warning("Filtered unknown types: %s", dict(excluded))
+            excluded_counts[etype] += 1
+
+    if projected_count:
+        log.info("Filtered out %d ProjectedEarningsRelease events", projected_count)
+    if excluded_counts:
+        log.warning("Filtered unknown types: %s", dict(excluded_counts))
     return filtered
+
+
+def dedupe_same_datetime(events):
+    """
+    Deduplicate events with identical ticker + datetime.
+
+    When multiple events have the exact same ticker and datetime, keep only the
+    highest priority one based on DATETIME_DEDUP_PRIORITY. This handles cases
+    where an earnings call and release date are scheduled at the exact same time.
+    """
+    if not DATETIME_DEDUP_PRIORITY:
+        return events
+
+    # Build priority lookup (lower number = higher priority)
+    priority = {t: i for i, t in enumerate(DATETIME_DEDUP_PRIORITY)}
+
+    # Group events by (ticker, datetime)
+    groups = defaultdict(list)
+    other = []
+
+    for event in events:
+        etype = event.get("event_type", "")
+        if etype in priority:
+            key = (event.get("ticker", ""), event.get("event_date_time_utc", ""))
+            groups[key].append(event)
+        else:
+            other.append(event)
+
+    # For each group, keep highest priority event
+    result = []
+    merged_count = 0
+
+    for key, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+        else:
+            # Sort by priority (lowest index = highest priority)
+            group.sort(key=lambda e: priority.get(e.get("event_type", ""), 999))
+            result.append(group[0])
+            merged_count += len(group) - 1
+            log.debug(
+                "Same datetime %s %s: kept %s, dropped %s",
+                key[0], key[1][:10] if key[1] else "",
+                group[0].get("event_type"),
+                [e.get("event_type") for e in group[1:]]
+            )
+
+    if merged_count:
+        log.info("Merged %d events with identical ticker+datetime", merged_count)
+
+    result.extend(other)
+    return result
 
 
 def build_dedup_lookup():
@@ -240,6 +314,7 @@ def consolidate_events(events):
         winner["event_type"] = key[0]
         result.append(winner)
 
+    # Apply rename rules to remaining events
     for event in other:
         if event.get("event_type", "") in RENAME_RULES:
             event = event.copy()
@@ -292,13 +367,21 @@ def main():
     events = filter_events(events)
     log.info("After filtering: %d events", len(events))
 
+    # Dedupe events with identical ticker+datetime (before rename)
+    before_datetime_dedup = len(events)
+    events = dedupe_same_datetime(events)
+    if before_datetime_dedup != len(events):
+        log.info("After datetime dedup: %d events", len(events))
+
+    # Apply fiscal period dedup and renames
     before = len(events)
     events = consolidate_events(events)
-    log.info(
-        "After consolidation: %d events (removed %d duplicates)",
-        len(events),
-        before - len(events),
-    )
+    if before != len(events):
+        log.info(
+            "After consolidation: %d events (removed %d duplicates)",
+            len(events),
+            before - len(events),
+        )
 
     events.sort(key=lambda x: x.get("event_date_time_utc", ""))
     save_events(events, OUTPUT_PATH)
