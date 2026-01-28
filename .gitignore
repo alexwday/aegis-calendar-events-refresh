@@ -43,9 +43,9 @@ env/
 Thumbs.db
 
 # Stage output files (generated, not tracked)
-stage_1_data_acquisition/output/*.csv
-stage_2_data_processing/output/*.csv
-visualization/output/*.html
+src/stage_1_data_acquisition/output/
+src/stage_2_data_processing/output/
+src/stage_3_database_upload/output/
 
 # Logs
 *.log
