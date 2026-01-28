@@ -45,11 +45,131 @@ PAST_MONTHS = 6
 FUTURE_MONTHS = 6
 MAX_DAYS_PER_QUERY = 89
 
+# =============================================================================
+# TICKER EXPANSION FEATURE
+# =============================================================================
+# Set to True to try alternate ticker formats for Canadian (-CA) tickers.
+# When enabled, for each -CA ticker (e.g., BMO-CA), the script will also
+# query the bare ticker (BMO) and US variant (BMO-US), then merge results.
+# This helps catch events that may be stored under different ticker formats.
+EXPAND_CANADIAN_TICKERS = True
+# =============================================================================
+
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
 )
 log = logging.getLogger(__name__)
+
+
+def expand_canadian_tickers(tickers):
+    """
+    For tickers ending in -CA, also add bare and -US variants to query.
+
+    Returns:
+        tuple: (expanded_tickers, variant_to_canonical_map)
+        - expanded_tickers: List with original + variant tickers
+        - variant_to_canonical_map: Dict mapping any ticker to its canonical form
+
+    Example:
+        Input: ["BMO-CA", "JPM-US"]
+        Output: (
+            ["BMO-CA", "BMO", "BMO-US", "JPM-US"],
+            {"BMO-CA": "BMO-CA", "BMO": "BMO-CA", "BMO-US": "BMO-CA", "JPM-US": "JPM-US"}
+        )
+    """
+    expanded = []
+    variant_map = {}
+
+    for ticker in tickers:
+        if ticker not in expanded:
+            expanded.append(ticker)
+        variant_map[ticker] = ticker
+
+        if ticker.endswith("-CA"):
+            base = ticker[:-3]
+            if base not in expanded:
+                expanded.append(base)
+            variant_map[base] = ticker
+            us_variant = f"{base}-US"
+            if us_variant not in expanded:
+                expanded.append(us_variant)
+            variant_map[us_variant] = ticker
+
+    return expanded, variant_map
+
+
+def merge_variant_events(events, variant_map):
+    """
+    Merge events from ticker variants into canonical tickers with smart deduplication.
+
+    Deduplication logic:
+    - Events are duplicates if same (canonical_ticker, event_type, fiscal_year, fiscal_period)
+    - For events without fiscal info, use (canonical_ticker, event_type, event_date)
+    - When duplicates found, prefer:
+        1. Canonical ticker source (e.g., BMO-CA over BMO)
+        2. More complete data (has webcast_link)
+        3. Later event_date_time (more likely accurate/updated)
+    """
+    if not events:
+        return []
+
+    # Step 1: Remap tickers to canonical and track source
+    for event in events:
+        original = event.get("ticker", "")
+        canonical = variant_map.get(original, original)
+        event["_original_ticker"] = original
+        event["ticker"] = canonical
+
+    # Step 2: Group by deduplication key
+    groups = defaultdict(list)
+    for event in events:
+        ticker = event.get("ticker", "")
+        event_type = event.get("event_type", "")
+        fiscal_year = event.get("fiscal_year", "")
+        fiscal_period = event.get("fiscal_period", "")
+
+        if fiscal_year and fiscal_period:
+            key = (ticker, event_type, fiscal_year, fiscal_period)
+        else:
+            event_dt = event.get("event_date_time")
+            event_date = str(event_dt)[:10] if event_dt else ""
+            key = (ticker, event_type, "_date_", event_date)
+
+        groups[key].append(event)
+
+    # Step 3: Pick best from each group
+    merged = []
+    duplicates = 0
+
+    for key, group in groups.items():
+        if len(group) == 1:
+            best = group[0]
+        else:
+            duplicates += 1
+
+            def score(e):
+                is_canonical = 1 if e.get("ticker") == e.get("_original_ticker") else 0
+                has_webcast = 1 if e.get("webcast_link") else 0
+                has_contact = 1 if e.get("contact_email") or e.get("contact_phone") else 0
+                date_str = str(e.get("event_date_time", "") or "")
+                return (is_canonical, has_webcast + has_contact, date_str)
+
+            group.sort(key=score, reverse=True)
+            best = group[0]
+            sources = [e.get("_original_ticker") for e in group]
+            log.debug("Merged %s: %s -> kept %s", key[0], sources, best.get("_original_ticker"))
+
+        merged.append(best)
+
+    # Cleanup internal field
+    for event in merged:
+        event.pop("_original_ticker", None)
+
+    if duplicates:
+        log.info("Merged %d duplicate events from ticker variants", duplicates)
+
+    return merged
 
 
 def load_institutions():
@@ -138,13 +258,38 @@ def query_chunk(api, tickers, start, end):
 
 def fetch_events(api, tickers, start_date, end_date):
     """Fetch all events across date range chunks."""
+    # Expand Canadian tickers if enabled
+    variant_map = {}
+    if EXPAND_CANADIAN_TICKERS:
+        query_tickers, variant_map = expand_canadian_tickers(tickers)
+        ca_tickers = [t for t in tickers if t.endswith("-CA")]
+        if ca_tickers:
+            log.info("TICKER EXPANSION: %d -CA tickers -> %d query tickers",
+                     len(ca_tickers), len(query_tickers) - len(tickers) + len(ca_tickers))
+            for ca in ca_tickers[:3]:
+                base = ca[:-3]
+                log.info("  %s -> also trying: %s, %s-US", ca, base, base)
+            if len(ca_tickers) > 3:
+                log.info("  ... and %d more", len(ca_tickers) - 3)
+    else:
+        query_tickers = tickers
+        variant_map = {t: t for t in tickers}
+
     chunks = split_date_range(start_date, end_date)
     log.info("Querying %d chunks from %s to %s", len(chunks), start_date, end_date)
 
     events = []
     for i, (start, end) in enumerate(chunks, 1):
         log.info("  Chunk %d/%d: %s to %s", i, len(chunks), start, end)
-        events.extend(query_chunk(api, tickers, start, end))
+        events.extend(query_chunk(api, query_tickers, start, end))
+
+    # Merge variant events if expansion was used
+    if EXPAND_CANADIAN_TICKERS and variant_map:
+        raw_count = len(events)
+        events = merge_variant_events(events, variant_map)
+        if raw_count != len(events):
+            log.info("Events: %d raw -> %d after merge", raw_count, len(events))
+
     return events
 
 
