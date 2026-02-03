@@ -48,11 +48,15 @@ FUTURE_MONTHS = 6
 DELAY_BETWEEN_CHUNKS = 1  # Seconds to wait between API calls
 
 # =============================================================================
-# TICKER EXPANSION FEATURE
+# CANADIAN BANK TICKER HANDLING
 # =============================================================================
-# Canadian banks that should ALSO be queried with their -US ticker variant.
-# FactSet sometimes stores Canadian bank events under US tickers.
-# Results found via -US will be remapped back to -CA in the output.
+# The 7 Canadian banks. We query BOTH -CA and -US variants from FactSet
+# (because FactSet sometimes stores events under US tickers), but the
+# FINAL OUTPUT must always show -CA tickers, never -US.
+#
+# This is enforced by normalize_canadian_bank_tickers() which runs right
+# before saving to CSV - a simple, bulletproof final cleanup.
+
 CANADIAN_BANK_TICKERS = [
     "RY-CA",   # Royal Bank of Canada
     "TD-CA",   # Toronto-Dominion Bank
@@ -62,6 +66,9 @@ CANADIAN_BANK_TICKERS = [
     "NA-CA",   # National Bank of Canada
     "LB-CA",   # Laurentian Bank
 ]
+
+# Base tickers (without country suffix) for normalization
+CANADIAN_BANK_BASES = ["RY", "TD", "BMO", "BNS", "CM", "NA", "LB"]
 # =============================================================================
 
 
@@ -71,135 +78,70 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def expand_canadian_bank_tickers(tickers):
+def get_query_tickers(tickers):
     """
-    For the 7 Canadian bank tickers, also add -US variant to query.
+    Expand ticker list to include US variants for the 7 Canadian banks.
 
-    Only expands tickers listed in CANADIAN_BANK_TICKERS, not all -CA tickers.
-    Results found via -US queries will be remapped back to -CA.
+    We query both -CA and -US because FactSet sometimes stores events under -US.
+    The normalize_canadian_bank_tickers() function will fix the output.
 
-    Returns:
-        tuple: (expanded_tickers, variant_to_canonical_map)
-        - expanded_tickers: List with original + variant tickers
-        - variant_to_canonical_map: Dict mapping any ticker to its canonical form
-
-    Example:
-        Input: ["BMO-CA", "MFC-CA", "JPM-US"]
-        Output: (
-            ["BMO-CA", "BMO-US", "MFC-CA", "JPM-US"],  # Only BMO expanded
-            {"BMO-CA": "BMO-CA", "BMO-US": "BMO-CA", "MFC-CA": "MFC-CA", "JPM-US": "JPM-US"}
-        )
+    Returns just the expanded list (no mapping needed - cleanup handles it).
     """
-    expanded = []
-    variant_map = {}
+    query_tickers = list(tickers)
+    added = []
 
     for ticker in tickers:
-        if ticker not in expanded:
-            expanded.append(ticker)
-        variant_map[ticker] = ticker
-
-        # Only expand the 7 Canadian banks, not all -CA tickers
         if ticker in CANADIAN_BANK_TICKERS:
-            base = ticker[:-3]
+            base = ticker[:-3]  # "RY-CA" -> "RY"
             us_variant = f"{base}-US"
-            if us_variant not in expanded:
-                expanded.append(us_variant)
-            variant_map[us_variant] = ticker
+            if us_variant not in query_tickers:
+                query_tickers.append(us_variant)
+                added.append(us_variant)
 
-    return expanded, variant_map
+    if added:
+        log.info("Query expansion: Added %d US variants for Canadian banks: %s",
+                 len(added), ", ".join(added))
+
+    return query_tickers
 
 
-def merge_variant_events(events, variant_map):
+def normalize_canadian_bank_tickers(events):
     """
-    Merge events from ticker variants into canonical tickers with smart deduplication.
+    FINAL CLEANUP: Force all Canadian bank events to use -CA tickers.
 
-    Deduplication logic:
-    - Events are duplicates if same (canonical_ticker, event_type, fiscal_year, fiscal_period)
-    - For events without fiscal info, use (canonical_ticker, event_type, event_date)
-    - When duplicates found, prefer:
-        1. Canonical ticker source (e.g., BMO-CA over BMO-US)
-        2. More complete data (has webcast_link)
-        3. Later event_date_time (more likely accurate/updated)
+    This is THE SINGLE PLACE where ticker normalization happens.
+    Called right before saving to CSV - simple and bulletproof.
+
+    For the 7 Canadian banks (RY, TD, BMO, BNS, CM, NA, LB):
+    - ticker field: "TD-US" -> "TD-CA"
+    - description field: "TD-US Q1..." -> "TD-CA Q1..."
     """
-    if not events:
-        return []
+    ticker_fixes = 0
+    desc_fixes = 0
 
-    # Build reverse map: find US variants that should be remapped to CA
-    us_to_ca_map = {k: v for k, v in variant_map.items() if k != v and k.endswith("-US")}
-    if us_to_ca_map:
-        log.info("Ticker remapping active: %s", us_to_ca_map)
-
-    # Step 1: Remap tickers to canonical and fix descriptions
-    remapped_count = 0
-    for event in events:
-        original = event.get("ticker", "")
-        canonical = variant_map.get(original, original)
-        event["_original_ticker"] = original
-
-        # Remap ticker if needed
-        if original != canonical:
-            event["ticker"] = canonical
-            remapped_count += 1
-
-            # Also fix the description - replace US ticker with CA ticker
-            description = event.get("description", "")
-            if description and original in description:
-                event["description"] = description.replace(original, canonical)
-        else:
-            event["ticker"] = canonical
-
-    if remapped_count:
-        log.info("Remapped %d events from US to CA tickers", remapped_count)
-
-    # Step 2: Group by deduplication key
-    groups = defaultdict(list)
     for event in events:
         ticker = event.get("ticker", "")
-        event_type = event.get("event_type", "")
-        fiscal_year = event.get("fiscal_year", "")
-        fiscal_period = event.get("fiscal_period", "")
+        description = event.get("description", "")
 
-        if fiscal_year and fiscal_period:
-            key = (ticker, event_type, fiscal_year, fiscal_period)
-        else:
-            event_dt = event.get("event_date_time")
-            event_date = str(event_dt)[:10] if event_dt else ""
-            key = (ticker, event_type, "_date_", event_date)
+        for base in CANADIAN_BANK_BASES:
+            us_ticker = f"{base}-US"
+            ca_ticker = f"{base}-CA"
 
-        groups[key].append(event)
+            # Fix ticker field
+            if ticker == us_ticker:
+                event["ticker"] = ca_ticker
+                ticker_fixes += 1
 
-    # Step 3: Pick best from each group
-    merged = []
-    duplicates = 0
+            # Fix description field
+            if us_ticker in description:
+                event["description"] = description.replace(us_ticker, ca_ticker)
+                desc_fixes += 1
 
-    for key, group in groups.items():
-        if len(group) == 1:
-            best = group[0]
-        else:
-            duplicates += 1
+    if ticker_fixes or desc_fixes:
+        log.info("TICKER NORMALIZATION: Fixed %d tickers, %d descriptions (US -> CA)",
+                 ticker_fixes, desc_fixes)
 
-            def score(e):
-                is_canonical = 1 if e.get("ticker") == e.get("_original_ticker") else 0
-                has_webcast = 1 if e.get("webcast_link") else 0
-                has_contact = 1 if e.get("contact_email") or e.get("contact_phone") else 0
-                date_str = str(e.get("event_date_time", "") or "")
-                return (is_canonical, has_webcast + has_contact, date_str)
-
-            group.sort(key=score, reverse=True)
-            best = group[0]
-            sources = [e.get("_original_ticker") for e in group]
-            log.debug("Merged %s: %s -> kept %s", key[0], sources, best.get("_original_ticker"))
-
-        merged.append(best)
-
-    # Cleanup internal field
-    for event in merged:
-        event.pop("_original_ticker", None)
-
-    if duplicates:
-        log.info("Merged %d duplicate events from ticker variants", duplicates)
-
-    return merged
+    return events
 
 
 def load_institutions():
@@ -330,20 +272,12 @@ def query_chunk(api, tickers, start, end, max_retries=5):
 
 def fetch_events(api, tickers, start_date, end_date):
     """Fetch all events across date range chunks."""
-    # Expand Canadian bank tickers to also query US variants
-    query_tickers, variant_map = expand_canadian_bank_tickers(tickers)
-
-    # Log which Canadian banks are being expanded
-    banks_to_expand = [t for t in tickers if t in CANADIAN_BANK_TICKERS]
-    if banks_to_expand:
-        us_variants = [f"{t[:-3]}-US" for t in banks_to_expand]
-        log.info("TICKER EXPANSION: %d Canadian banks will also be queried as -US",
-                 len(banks_to_expand))
-        log.info("  Banks: %s", ", ".join(banks_to_expand))
-        log.info("  US variants: %s", ", ".join(us_variants))
+    # Expand tickers to include US variants for Canadian banks
+    query_tickers = get_query_tickers(tickers)
 
     chunks = split_date_range(start_date, end_date)
-    log.info("Querying %d chunks from %s to %s", len(chunks), start_date, end_date)
+    log.info("Querying %d tickers across %d monthly chunks from %s to %s",
+             len(query_tickers), len(chunks), start_date, end_date)
 
     events = []
     for i, (start, end) in enumerate(chunks, 1):
@@ -353,13 +287,7 @@ def fetch_events(api, tickers, start_date, end_date):
         if i < len(chunks) and DELAY_BETWEEN_CHUNKS > 0:
             time.sleep(DELAY_BETWEEN_CHUNKS)
 
-    # Merge variant events - remap US tickers back to CA and deduplicate
-    if variant_map:
-        raw_count = len(events)
-        events = merge_variant_events(events, variant_map)
-        if raw_count != len(events):
-            log.info("Events: %d raw -> %d after merge", raw_count, len(events))
-
+    # Note: Ticker normalization (US -> CA) happens in save_events() right before CSV write
     return events
 
 
@@ -368,6 +296,10 @@ def save_events(events, output_path):
     if not events:
         log.warning("No events to save")
         return False
+
+    # FINAL CLEANUP: Normalize Canadian bank tickers (US -> CA)
+    # This is bulletproof - happens right before write, cannot fail
+    events = normalize_canadian_bank_tickers(events)
 
     fields = sorted({key for event in events for key in event.keys()})
     output_path.parent.mkdir(parents=True, exist_ok=True)
