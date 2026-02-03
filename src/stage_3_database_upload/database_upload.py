@@ -143,9 +143,18 @@ def insert_events(engine, events, dry_run=False):
     placeholders = ", ".join([f":{col}" for col in columns])
     col_names = ", ".join(columns)
 
+    # Columns that should be NULL instead of empty string (for integer/numeric types)
+    nullable_int_columns = {"institution_id", "fiscal_year"}
+
     with engine.connect() as conn:
         for event in events:
-            row = {col: event.get(col, "") for col in columns}
+            row = {}
+            for col in columns:
+                value = event.get(col, "")
+                # Convert empty strings to None for integer columns
+                if col in nullable_int_columns and value == "":
+                    value = None
+                row[col] = value
             conn.execute(
                 text(f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"),
                 row,
