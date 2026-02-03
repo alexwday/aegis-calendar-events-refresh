@@ -10,6 +10,7 @@ transformations, serving as the input for Stage 2 processing.
 import os
 import csv
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -232,8 +233,8 @@ def split_date_range(start_date, end_date):
     return ranges
 
 
-def query_chunk(api, tickers, start, end):
-    """Query API for a single date range chunk."""
+def query_chunk(api, tickers, start, end, max_retries=3):
+    """Query API for a single date range chunk with retry logic."""
     request = CompanyEventRequest(
         data=CompanyEventRequestData(
             date_time=CompanyEventRequestDataDateTime(
@@ -243,14 +244,34 @@ def query_chunk(api, tickers, start, end):
             universe=CompanyEventRequestDataUniverse(symbols=tickers, type="Tickers"),
         ),
     )
-    try:
-        response = api.get_company_event(request)
-        if response and hasattr(response, "data") and response.data:
-            return [e.to_dict() for e in response.data if e.ticker in tickers]
-        return []
-    except (ConnectionError, TimeoutError, ValueError, RuntimeError) as err:
-        log.error("API error: %s", err)
-        return []
+
+    for attempt in range(max_retries):
+        try:
+            response = api.get_company_event(request)
+            if response and hasattr(response, "data") and response.data:
+                return [e.to_dict() for e in response.data if e.ticker in tickers]
+            return []
+        except Exception as err:
+            error_msg = str(err)
+            is_last_attempt = attempt == max_retries - 1
+
+            # Check if it's a retryable error
+            is_retryable = any(x in error_msg.lower() for x in [
+                "parameter", "timeout", "connection", "temporary", "503", "429"
+            ])
+
+            if is_retryable and not is_last_attempt:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                log.warning(
+                    "API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait_time, error_msg[:100]
+                )
+                time.sleep(wait_time)
+            else:
+                log.error("API error (attempt %d/%d): %s", attempt + 1, max_retries, err)
+                return []
+
+    return []
 
 
 def fetch_events(api, tickers, start_date, end_date):
