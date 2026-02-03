@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 from pathlib import Path
 from urllib.parse import quote
 
