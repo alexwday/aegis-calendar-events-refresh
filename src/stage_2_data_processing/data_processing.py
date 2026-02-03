@@ -30,6 +30,10 @@ OUTPUT_PATH = Path(__file__).parent / "output" / "processed_calendar_events.csv"
 # Timezone for local time conversion
 LOCAL_TIMEZONE = "America/Toronto"
 
+# Canadian bank tickers that should always be -CA, never -US
+# (FactSet sometimes returns these with -US suffix)
+CANADIAN_BANK_BASES = ["RY", "TD", "BMO", "BNS", "CM", "NA", "LB"]
+
 # Event types to include in final output
 INCLUDED_EVENT_TYPES = [
     "Earnings",
@@ -119,6 +123,19 @@ def get_field(event, field, default=""):
     return event.get(FIELD_MAPPING.get(field, field), default) or default
 
 
+def normalize_canadian_ticker(ticker):
+    """
+    Normalize Canadian bank tickers: -US -> -CA.
+
+    FactSet sometimes returns Canadian bank events with -US suffix.
+    This ensures institution lookup works correctly.
+    """
+    for base in CANADIAN_BANK_BASES:
+        if ticker == f"{base}-US":
+            return f"{base}-CA"
+    return ticker
+
+
 def convert_timezone(utc_str):
     """Convert UTC datetime string to local time, returns (utc_iso, local_iso, date, time)."""
     if not utc_str:
@@ -163,7 +180,15 @@ def normalize_fiscal_year(value):
 
 def transform_event(raw, institutions, timestamp):
     """Transform raw event to output schema format."""
-    ticker = get_field(raw, "ticker")
+    # Normalize Canadian bank tickers (-US -> -CA) for correct institution lookup
+    raw_ticker = get_field(raw, "ticker")
+    ticker = normalize_canadian_ticker(raw_ticker)
+
+    # Also normalize description if it contains -US ticker
+    description = get_field(raw, "description")
+    if raw_ticker != ticker and raw_ticker in description:
+        description = description.replace(raw_ticker, ticker)
+
     inst = institutions.get(ticker, {})
     utc, local, date, time = convert_timezone(get_field(raw, "event_datetime_utc"))
     return {
@@ -173,7 +198,7 @@ def transform_event(raw, institutions, timestamp):
         "institution_id": inst.get("id", ""),
         "institution_type": inst.get("type", "Unknown"),
         "event_type": get_field(raw, "event_type"),
-        "event_headline": get_field(raw, "description"),
+        "event_headline": description,
         "event_date_time_utc": utc,
         "event_date_time_local": local,
         "event_date": date,
