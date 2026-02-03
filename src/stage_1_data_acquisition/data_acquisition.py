@@ -113,12 +113,32 @@ def merge_variant_events(events, variant_map):
     if not events:
         return []
 
-    # Step 1: Remap tickers to canonical and track source
+    # Build reverse map: find US variants that should be remapped to CA
+    us_to_ca_map = {k: v for k, v in variant_map.items() if k != v and k.endswith("-US")}
+    if us_to_ca_map:
+        log.info("Ticker remapping active: %s", us_to_ca_map)
+
+    # Step 1: Remap tickers to canonical and fix descriptions
+    remapped_count = 0
     for event in events:
         original = event.get("ticker", "")
         canonical = variant_map.get(original, original)
         event["_original_ticker"] = original
-        event["ticker"] = canonical
+
+        # Remap ticker if needed
+        if original != canonical:
+            event["ticker"] = canonical
+            remapped_count += 1
+
+            # Also fix the description - replace US ticker with CA ticker
+            description = event.get("description", "")
+            if description and original in description:
+                event["description"] = description.replace(original, canonical)
+        else:
+            event["ticker"] = canonical
+
+    if remapped_count:
+        log.info("Remapped %d events from US to CA tickers", remapped_count)
 
     # Step 2: Group by deduplication key
     groups = defaultdict(list)
