@@ -325,13 +325,11 @@ def fetch_events(api, tickers, start_date, end_date):
         query_tickers, variant_map = expand_canadian_tickers(tickers)
         ca_tickers = [t for t in tickers if t.endswith("-CA")]
         if ca_tickers:
-            log.info("TICKER EXPANSION: %d -CA tickers -> %d query tickers",
-                     len(ca_tickers), len(query_tickers) - len(tickers) + len(ca_tickers))
-            for ca in ca_tickers[:3]:
-                base = ca[:-3]
-                log.info("  %s -> also trying: %s-US", ca, base)
-            if len(ca_tickers) > 3:
-                log.info("  ... and %d more", len(ca_tickers) - 3)
+            log.info("TICKER EXPANSION: %d -CA tickers will also be queried as -US variants",
+                     len(ca_tickers))
+            us_variants = [f"{t[:-3]}-US" for t in ca_tickers]
+            log.info("  CA tickers: %s", ", ".join(ca_tickers))
+            log.info("  US variants: %s", ", ".join(us_variants))
     else:
         query_tickers = tickers
         variant_map = {t: t for t in tickers}
