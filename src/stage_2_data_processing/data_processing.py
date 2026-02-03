@@ -130,9 +130,15 @@ def normalize_canadian_ticker(ticker):
     FactSet sometimes returns Canadian bank events with -US suffix.
     This ensures institution lookup works correctly.
     """
+    # Strip whitespace just in case
+    ticker = ticker.strip() if ticker else ""
+
     for base in CANADIAN_BANK_BASES:
-        if ticker == f"{base}-US":
-            return f"{base}-CA"
+        us_ticker = f"{base}-US"
+        if ticker == us_ticker:
+            ca_ticker = f"{base}-CA"
+            log.debug("Normalized ticker: %s -> %s", ticker, ca_ticker)
+            return ca_ticker
     return ticker
 
 
@@ -190,6 +196,10 @@ def transform_event(raw, institutions, timestamp):
         description = description.replace(raw_ticker, ticker)
 
     inst = institutions.get(ticker, {})
+
+    # Debug: log if institution not found
+    if not inst and ticker:
+        log.warning("Institution not found for ticker: '%s' (raw: '%s')", ticker, raw_ticker)
     utc, local, date, time = convert_timezone(get_field(raw, "event_datetime_utc"))
     return {
         "event_id": get_field(raw, "event_id"),
