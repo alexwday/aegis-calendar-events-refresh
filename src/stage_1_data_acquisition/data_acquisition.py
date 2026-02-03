@@ -48,22 +48,20 @@ FUTURE_MONTHS = 6
 DELAY_BETWEEN_CHUNKS = 1  # Seconds to wait between API calls
 
 # =============================================================================
-# CANADIAN BANK TICKER EXPANSION
+# CANADIAN BANK US TICKER VARIANTS
 # =============================================================================
-# The 7 Canadian banks that need to be queried with BOTH -CA and -US variants.
-# FactSet sometimes stores events under US tickers for these Canadian banks.
-#
-# Stage 1 queries both variants and saves RAW data (may contain -US tickers).
-# Stage 2 handles normalization (-US -> -CA) during processing.
+# FactSet sometimes stores Canadian bank events under US tickers.
+# We query these additional US variants to capture all events.
+# Stage 2 will normalize -US back to -CA during processing.
 
-CANADIAN_BANK_TICKERS = [
-    "RY-CA",   # Royal Bank of Canada
-    "TD-CA",   # Toronto-Dominion Bank
-    "BMO-CA",  # Bank of Montreal
-    "BNS-CA",  # Bank of Nova Scotia
-    "CM-CA",   # Canadian Imperial Bank of Commerce
-    "NA-CA",   # National Bank of Canada
-    "LB-CA",   # Laurentian Bank
+CANADIAN_BANK_US_VARIANTS = [
+    "RY-US",   # Royal Bank of Canada
+    "TD-US",   # Toronto-Dominion Bank
+    "BMO-US",  # Bank of Montreal
+    "BNS-US",  # Bank of Nova Scotia
+    "CM-US",   # Canadian Imperial Bank of Commerce
+    "NA-US",   # National Bank of Canada
+    "LB-US",   # Laurentian Bank
 ]
 # =============================================================================
 
@@ -76,28 +74,15 @@ log = logging.getLogger(__name__)
 
 def get_query_tickers(tickers):
     """
-    Expand ticker list to include US variants for the 7 Canadian banks.
+    Add the 7 Canadian bank US variants to the query list.
 
-    We query both -CA and -US because FactSet sometimes stores events under -US.
-    Stage 2 will normalize these back to -CA during processing.
-
-    Returns the expanded list of tickers to query.
+    We query both -CA (from YAML) and -US (hardcoded) because FactSet
+    sometimes stores events under US tickers for Canadian banks.
+    Stage 2 will normalize -US back to -CA during processing.
     """
-    query_tickers = list(tickers)
-    added = []
-
-    for ticker in tickers:
-        if ticker in CANADIAN_BANK_TICKERS:
-            base = ticker[:-3]  # "RY-CA" -> "RY"
-            us_variant = f"{base}-US"
-            if us_variant not in query_tickers:
-                query_tickers.append(us_variant)
-                added.append(us_variant)
-
-    if added:
-        log.info("Query expansion: Added %d US variants for Canadian banks: %s",
-                 len(added), ", ".join(added))
-
+    query_tickers = list(tickers) + CANADIAN_BANK_US_VARIANTS
+    log.info("Query expansion: Added %d Canadian bank US variants: %s",
+             len(CANADIAN_BANK_US_VARIANTS), ", ".join(CANADIAN_BANK_US_VARIANTS))
     return query_tickers
 
 
