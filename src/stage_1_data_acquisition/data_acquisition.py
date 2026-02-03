@@ -48,14 +48,13 @@ FUTURE_MONTHS = 6
 DELAY_BETWEEN_CHUNKS = 1  # Seconds to wait between API calls
 
 # =============================================================================
-# CANADIAN BANK TICKER HANDLING
+# CANADIAN BANK TICKER EXPANSION
 # =============================================================================
-# The 7 Canadian banks. We query BOTH -CA and -US variants from FactSet
-# (because FactSet sometimes stores events under US tickers), but the
-# FINAL OUTPUT must always show -CA tickers, never -US.
+# The 7 Canadian banks that need to be queried with BOTH -CA and -US variants.
+# FactSet sometimes stores events under US tickers for these Canadian banks.
 #
-# This is enforced by normalize_canadian_bank_tickers() which runs right
-# before saving to CSV - a simple, bulletproof final cleanup.
+# Stage 1 queries both variants and saves RAW data (may contain -US tickers).
+# Stage 2 handles normalization (-US -> -CA) during processing.
 
 CANADIAN_BANK_TICKERS = [
     "RY-CA",   # Royal Bank of Canada
@@ -66,9 +65,6 @@ CANADIAN_BANK_TICKERS = [
     "NA-CA",   # National Bank of Canada
     "LB-CA",   # Laurentian Bank
 ]
-
-# Base tickers (without country suffix) for normalization
-CANADIAN_BANK_BASES = ["RY", "TD", "BMO", "BNS", "CM", "NA", "LB"]
 # =============================================================================
 
 
@@ -83,9 +79,9 @@ def get_query_tickers(tickers):
     Expand ticker list to include US variants for the 7 Canadian banks.
 
     We query both -CA and -US because FactSet sometimes stores events under -US.
-    The normalize_canadian_bank_tickers() function will fix the output.
+    Stage 2 will normalize these back to -CA during processing.
 
-    Returns just the expanded list (no mapping needed - cleanup handles it).
+    Returns the expanded list of tickers to query.
     """
     query_tickers = list(tickers)
     added = []
@@ -103,45 +99,6 @@ def get_query_tickers(tickers):
                  len(added), ", ".join(added))
 
     return query_tickers
-
-
-def normalize_canadian_bank_tickers(events):
-    """
-    FINAL CLEANUP: Force all Canadian bank events to use -CA tickers.
-
-    This is THE SINGLE PLACE where ticker normalization happens.
-    Called right before saving to CSV - simple and bulletproof.
-
-    For the 7 Canadian banks (RY, TD, BMO, BNS, CM, NA, LB):
-    - ticker field: "TD-US" -> "TD-CA"
-    - description field: "TD-US Q1..." -> "TD-CA Q1..."
-    """
-    ticker_fixes = 0
-    desc_fixes = 0
-
-    for event in events:
-        ticker = event.get("ticker", "")
-        description = event.get("description", "")
-
-        for base in CANADIAN_BANK_BASES:
-            us_ticker = f"{base}-US"
-            ca_ticker = f"{base}-CA"
-
-            # Fix ticker field
-            if ticker == us_ticker:
-                event["ticker"] = ca_ticker
-                ticker_fixes += 1
-
-            # Fix description field
-            if us_ticker in description:
-                event["description"] = description.replace(us_ticker, ca_ticker)
-                desc_fixes += 1
-
-    if ticker_fixes or desc_fixes:
-        log.info("TICKER NORMALIZATION: Fixed %d tickers, %d descriptions (US -> CA)",
-                 ticker_fixes, desc_fixes)
-
-    return events
 
 
 def load_institutions():
@@ -287,20 +244,17 @@ def fetch_events(api, tickers, start_date, end_date):
         if i < len(chunks) and DELAY_BETWEEN_CHUNKS > 0:
             time.sleep(DELAY_BETWEEN_CHUNKS)
 
-    # Note: Ticker normalization (US -> CA) happens in save_events() right before CSV write
+    # Raw events returned as-is. Ticker normalization (-US -> -CA) happens in Stage 2.
     return events
 
 
 def save_events(events, output_path):
-    """Save events to CSV preserving all fields."""
+    """Save events to CSV preserving all fields - NO transformations."""
     if not events:
         log.warning("No events to save")
         return False
 
-    # FINAL CLEANUP: Normalize Canadian bank tickers (US -> CA)
-    # This is bulletproof - happens right before write, cannot fail
-    events = normalize_canadian_bank_tickers(events)
-
+    # Save raw data as-is. Ticker normalization (-US -> -CA) happens in Stage 2.
     fields = sorted({key for event in events for key in event.keys()})
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
