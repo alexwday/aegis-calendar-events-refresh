@@ -7,12 +7,13 @@ the same output format. The output contains all fields from the API response wit
 transformations, serving as the input for Stage 2 processing.
 """
 
-import os
+import calendar
 import csv
 import logging
+import os
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from urllib.parse import quote
 
@@ -44,7 +45,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 # Date range configuration
 PAST_MONTHS = 6
 FUTURE_MONTHS = 6
-MAX_DAYS_PER_QUERY = 89
+DELAY_BETWEEN_CHUNKS = 1  # Seconds to wait between API calls
 
 # =============================================================================
 # TICKER EXPANSION FEATURE
@@ -213,27 +214,49 @@ def create_api_client():
     return config
 
 
+def add_months(d, months):
+    """Add (or subtract) months to a date, handling year boundaries."""
+    month = d.month + months
+    year = d.year + (month - 1) // 12
+    month = ((month - 1) % 12) + 1
+    # Clamp day to valid range for the new month
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def get_date_range():
     """Calculate query date range based on configured months."""
     today = datetime.now().date()
-    return (
-        today - timedelta(days=PAST_MONTHS * 30),
-        today + timedelta(days=FUTURE_MONTHS * 30),
-    )
+    start = add_months(today, -PAST_MONTHS).replace(day=1)  # First day of start month
+    end_month = add_months(today, FUTURE_MONTHS)
+    end = date(end_month.year, end_month.month, calendar.monthrange(end_month.year, end_month.month)[1])
+    return (start, end)
 
 
 def split_date_range(start_date, end_date):
-    """Split date range into API-compliant chunks."""
+    """Split date range into monthly chunks (first to last day of each month)."""
     ranges = []
     current = start_date
-    while current < end_date:
-        chunk_end = min(current + timedelta(days=MAX_DAYS_PER_QUERY), end_date)
+
+    while current <= end_date:
+        # Get last day of current month
+        last_day = calendar.monthrange(current.year, current.month)[1]
+        month_end = date(current.year, current.month, last_day)
+
+        # Don't go past the end date
+        chunk_end = min(month_end, end_date)
         ranges.append((current, chunk_end))
-        current = chunk_end + timedelta(days=1)
+
+        # Move to first day of next month
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+
     return ranges
 
 
-def query_chunk(api, tickers, start, end, max_retries=3):
+def query_chunk(api, tickers, start, end, max_retries=5):
     """Query API for a single date range chunk with retry logic."""
     request = CompanyEventRequest(
         data=CompanyEventRequestData(
@@ -300,6 +323,9 @@ def fetch_events(api, tickers, start_date, end_date):
     for i, (start, end) in enumerate(chunks, 1):
         log.info("  Chunk %d/%d: %s to %s", i, len(chunks), start, end)
         events.extend(query_chunk(api, query_tickers, start, end))
+        # Delay between chunks to avoid rate limiting
+        if i < len(chunks) and DELAY_BETWEEN_CHUNKS > 0:
+            time.sleep(DELAY_BETWEEN_CHUNKS)
 
     # Merge variant events if expansion was used
     if EXPAND_CANADIAN_TICKERS and variant_map:
