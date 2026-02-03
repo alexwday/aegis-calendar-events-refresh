@@ -130,15 +130,10 @@ def normalize_canadian_ticker(ticker):
     FactSet sometimes returns Canadian bank events with -US suffix.
     This ensures institution lookup works correctly.
     """
-    # Strip whitespace just in case
-    ticker = ticker.strip() if ticker else ""
-
+    ticker = (ticker or "").strip()
     for base in CANADIAN_BANK_BASES:
-        us_ticker = f"{base}-US"
-        if ticker == us_ticker:
-            ca_ticker = f"{base}-CA"
-            log.debug("Normalized ticker: %s -> %s", ticker, ca_ticker)
-            return ca_ticker
+        if ticker == f"{base}-US":
+            return f"{base}-CA"
     return ticker
 
 
@@ -196,10 +191,6 @@ def transform_event(raw, institutions, timestamp):
         description = description.replace(raw_ticker, ticker)
 
     inst = institutions.get(ticker, {})
-
-    # Debug: log if institution not found
-    if not inst and ticker:
-        log.warning("Institution not found for ticker: '%s' (raw: '%s')", ticker, raw_ticker)
     utc, local, date, time = convert_timezone(get_field(raw, "event_datetime_utc"))
     return {
         "event_id": get_field(raw, "event_id"),
@@ -391,12 +382,6 @@ def main():
     log.info(
         "Loaded %d raw events, %d institutions", len(raw_events), len(institutions)
     )
-
-    # Debug: Check Canadian bank tickers in institutions
-    ca_banks = ["RY-CA", "TD-CA", "BMO-CA", "BNS-CA", "CM-CA", "NA-CA", "LB-CA"]
-    for ticker in ca_banks:
-        found = ticker in institutions
-        log.info("  %s in institutions: %s", ticker, found)
 
     timestamp = datetime.now(pytz.UTC).isoformat()
     events = [transform_event(raw, institutions, timestamp) for raw in raw_events]
