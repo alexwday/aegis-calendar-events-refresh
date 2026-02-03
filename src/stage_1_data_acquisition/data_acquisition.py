@@ -50,11 +50,18 @@ DELAY_BETWEEN_CHUNKS = 1  # Seconds to wait between API calls
 # =============================================================================
 # TICKER EXPANSION FEATURE
 # =============================================================================
-# Set to True to try alternate ticker formats for Canadian (-CA) tickers.
-# When enabled, for each -CA ticker (e.g., BMO-CA), the script will also
-# query the US variant (BMO-US), then merge results preferring -CA source.
-# This helps catch events that may be stored under different ticker formats.
-EXPAND_CANADIAN_TICKERS = True
+# Canadian banks that should ALSO be queried with their -US ticker variant.
+# FactSet sometimes stores Canadian bank events under US tickers.
+# Results found via -US will be remapped back to -CA in the output.
+CANADIAN_BANK_TICKERS = [
+    "RY-CA",   # Royal Bank of Canada
+    "TD-CA",   # Toronto-Dominion Bank
+    "BMO-CA",  # Bank of Montreal
+    "BNS-CA",  # Bank of Nova Scotia
+    "CM-CA",   # Canadian Imperial Bank of Commerce
+    "NA-CA",   # National Bank of Canada
+    "LB-CA",   # Laurentian Bank
+]
 # =============================================================================
 
 
@@ -64,9 +71,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def expand_canadian_tickers(tickers):
+def expand_canadian_bank_tickers(tickers):
     """
-    For tickers ending in -CA, also add -US variant to query.
+    For the 7 Canadian bank tickers, also add -US variant to query.
+
+    Only expands tickers listed in CANADIAN_BANK_TICKERS, not all -CA tickers.
+    Results found via -US queries will be remapped back to -CA.
 
     Returns:
         tuple: (expanded_tickers, variant_to_canonical_map)
@@ -74,10 +84,10 @@ def expand_canadian_tickers(tickers):
         - variant_to_canonical_map: Dict mapping any ticker to its canonical form
 
     Example:
-        Input: ["BMO-CA", "JPM-US"]
+        Input: ["BMO-CA", "MFC-CA", "JPM-US"]
         Output: (
-            ["BMO-CA", "BMO-US", "JPM-US"],
-            {"BMO-CA": "BMO-CA", "BMO-US": "BMO-CA", "JPM-US": "JPM-US"}
+            ["BMO-CA", "BMO-US", "MFC-CA", "JPM-US"],  # Only BMO expanded
+            {"BMO-CA": "BMO-CA", "BMO-US": "BMO-CA", "MFC-CA": "MFC-CA", "JPM-US": "JPM-US"}
         )
     """
     expanded = []
@@ -88,7 +98,8 @@ def expand_canadian_tickers(tickers):
             expanded.append(ticker)
         variant_map[ticker] = ticker
 
-        if ticker.endswith("-CA"):
+        # Only expand the 7 Canadian banks, not all -CA tickers
+        if ticker in CANADIAN_BANK_TICKERS:
             base = ticker[:-3]
             us_variant = f"{base}-US"
             if us_variant not in expanded:
@@ -319,20 +330,17 @@ def query_chunk(api, tickers, start, end, max_retries=5):
 
 def fetch_events(api, tickers, start_date, end_date):
     """Fetch all events across date range chunks."""
-    # Expand Canadian tickers if enabled
-    variant_map = {}
-    if EXPAND_CANADIAN_TICKERS:
-        query_tickers, variant_map = expand_canadian_tickers(tickers)
-        ca_tickers = [t for t in tickers if t.endswith("-CA")]
-        if ca_tickers:
-            log.info("TICKER EXPANSION: %d -CA tickers will also be queried as -US variants",
-                     len(ca_tickers))
-            us_variants = [f"{t[:-3]}-US" for t in ca_tickers]
-            log.info("  CA tickers: %s", ", ".join(ca_tickers))
-            log.info("  US variants: %s", ", ".join(us_variants))
-    else:
-        query_tickers = tickers
-        variant_map = {t: t for t in tickers}
+    # Expand Canadian bank tickers to also query US variants
+    query_tickers, variant_map = expand_canadian_bank_tickers(tickers)
+
+    # Log which Canadian banks are being expanded
+    banks_to_expand = [t for t in tickers if t in CANADIAN_BANK_TICKERS]
+    if banks_to_expand:
+        us_variants = [f"{t[:-3]}-US" for t in banks_to_expand]
+        log.info("TICKER EXPANSION: %d Canadian banks will also be queried as -US",
+                 len(banks_to_expand))
+        log.info("  Banks: %s", ", ".join(banks_to_expand))
+        log.info("  US variants: %s", ", ".join(us_variants))
 
     chunks = split_date_range(start_date, end_date)
     log.info("Querying %d chunks from %s to %s", len(chunks), start_date, end_date)
@@ -345,8 +353,8 @@ def fetch_events(api, tickers, start_date, end_date):
         if i < len(chunks) and DELAY_BETWEEN_CHUNKS > 0:
             time.sleep(DELAY_BETWEEN_CHUNKS)
 
-    # Merge variant events if expansion was used
-    if EXPAND_CANADIAN_TICKERS and variant_map:
+    # Merge variant events - remap US tickers back to CA and deduplicate
+    if variant_map:
         raw_count = len(events)
         events = merge_variant_events(events, variant_map)
         if raw_count != len(events):
