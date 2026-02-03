@@ -392,6 +392,12 @@ def main():
         "Loaded %d raw events, %d institutions", len(raw_events), len(institutions)
     )
 
+    # Debug: Check Canadian bank tickers in institutions
+    ca_banks = ["RY-CA", "TD-CA", "BMO-CA", "BNS-CA", "CM-CA", "NA-CA", "LB-CA"]
+    for ticker in ca_banks:
+        found = ticker in institutions
+        log.info("  %s in institutions: %s", ticker, found)
+
     timestamp = datetime.now(pytz.UTC).isoformat()
     events = [transform_event(raw, institutions, timestamp) for raw in raw_events]
 
