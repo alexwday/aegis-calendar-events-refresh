@@ -342,13 +342,69 @@ def dedupe_same_datetime(events):
     return result
 
 
+def _get_event_month(event):
+    """Extract YYYY-MM from event_date, or empty string if unavailable."""
+    date = event.get("event_date", "") or ""
+    return date[:7] if len(date) >= 7 else ""
+
+
+def _pick_by_peer_comparison(group, fiscal_year, fiscal_period, peer_index):
+    """
+    Pick the best event from a duplicate group using peer comparison.
+
+    When duplicate earnings events have dates in different months, compare against
+    other Canadian banks' earnings for the same fiscal period to find the consensus.
+    """
+    # Get months from peer events for this fiscal period
+    peer_key = (fiscal_year, fiscal_period)
+    peer_months = peer_index.get(peer_key, {})
+
+    if not peer_months:
+        # No peer data - fall back to last_modified
+        return None
+
+    # Find the consensus month (most common among peers)
+    consensus_month = max(peer_months, key=peer_months.get)
+    consensus_count = peer_months[consensus_month]
+
+    # Look for an event in our group that matches the consensus month
+    for event in group:
+        if _get_event_month(event) == consensus_month:
+            log.debug(
+                "Peer comparison: picked %s (%d peers in %s)",
+                event.get("event_date", ""),
+                consensus_count,
+                consensus_month,
+            )
+            return event
+
+    # No event matches consensus - fall back to last_modified
+    return None
+
+
+def _pick_by_last_modified(group):
+    """Pick the most recently modified event from a group."""
+    group_sorted = sorted(
+        group,
+        key=lambda e: e.get("_last_modified_date", "") or "",
+        reverse=True,
+    )
+    return group_sorted[0]
+
+
 def dedupe_earnings_by_fiscal_period(events):
     """
     Deduplicate Earnings events by ticker + fiscal_year + fiscal_period.
 
     When we query both -CA and -US tickers for Canadian banks, we may get duplicate
     earnings events for the same fiscal period. After ticker normalization (both
-    become -CA), we keep only the most recently modified event for each combination.
+    become -CA), we resolve duplicates using:
+
+    1. If dates are in the same month: keep the most recently modified event
+    2. If dates are in different months: use peer comparison - look at other Canadian
+       banks' earnings for that fiscal period and pick the date that matches the
+       consensus month (Canadian banks report earnings in the same week typically)
+    3. Fall back to most recently modified if peer comparison is inconclusive
     """
     earnings = []
     other = []
@@ -374,33 +430,73 @@ def dedupe_earnings_by_fiscal_period(events):
             # No fiscal period info, can't dedupe - keep as-is
             other.append(event)
 
-    # For each group, keep the event with the most recent last_modified_date
+    # Build peer index: for each (fiscal_year, fiscal_period), count events per month
+    # across ALL tickers (used for peer comparison when dates conflict)
+    peer_index = defaultdict(lambda: defaultdict(int))
+    for event in earnings:
+        fy = event.get("fiscal_year", "")
+        fp = event.get("fiscal_period", "")
+        month = _get_event_month(event)
+        if fy and fp and month:
+            peer_index[(fy, fp)][month] += 1
+
+    # Process each group
     result = []
     deduped_count = 0
+    peer_resolved_count = 0
 
     for key, group in groups.items():
+        ticker, fy, fp = key
+
         if len(group) == 1:
             result.append(group[0])
+            continue
+
+        # Multiple events for same ticker + fiscal period
+        # Check if dates are in different months
+        months = set(_get_event_month(e) for e in group)
+        months.discard("")  # Remove empty strings
+
+        if len(months) <= 1:
+            # Same month (or no dates) - use last_modified
+            winner = _pick_by_last_modified(group)
+            method = "last_modified"
         else:
-            # Sort by last_modified_date descending (most recent first)
-            # Events without last_modified_date sort to the end
-            group.sort(
-                key=lambda e: e.get("_last_modified_date", "") or "",
-                reverse=True,
-            )
-            result.append(group[0])
-            deduped_count += len(group) - 1
-            log.debug(
-                "Earnings dedup %s FY%s Q%s: kept modified %s, dropped %d older",
-                key[0], key[1], key[2],
-                group[0].get("_last_modified_date", "unknown")[:10],
-                len(group) - 1,
-            )
+            # Different months - try peer comparison
+            # Build peer index excluding this ticker's events
+            filtered_peer_index = defaultdict(lambda: defaultdict(int))
+            for event in earnings:
+                if event.get("ticker") != ticker:
+                    e_fy = event.get("fiscal_year", "")
+                    e_fp = event.get("fiscal_period", "")
+                    month = _get_event_month(event)
+                    if e_fy and e_fp and month:
+                        filtered_peer_index[(e_fy, e_fp)][month] += 1
+
+            winner = _pick_by_peer_comparison(group, fy, fp, filtered_peer_index)
+            if winner:
+                method = "peer_comparison"
+                peer_resolved_count += 1
+            else:
+                # Peer comparison inconclusive - fall back to last_modified
+                winner = _pick_by_last_modified(group)
+                method = "last_modified (peer inconclusive)"
+
+        result.append(winner)
+        deduped_count += len(group) - 1
+        log.debug(
+            "Earnings dedup %s FY%s Q%s: kept %s via %s, dropped %d",
+            ticker, fy, fp,
+            winner.get("event_date", "unknown"),
+            method,
+            len(group) - 1,
+        )
 
     if deduped_count:
         log.info(
-            "Deduplicated %d earnings events by fiscal period (kept most recent)",
+            "Deduplicated %d earnings events by fiscal period (%d via peer comparison)",
             deduped_count,
+            peer_resolved_count,
         )
 
     result.extend(other)
