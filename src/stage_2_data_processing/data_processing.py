@@ -138,13 +138,40 @@ def normalize_canadian_ticker(ticker):
 
 
 def convert_timezone(utc_str):
-    """Convert UTC datetime string to local time, returns (utc_iso, local_iso, date, time)."""
+    """Convert UTC datetime string to local time.
+
+    Returns (utc_iso, local_iso, date, time, time_unconfirmed).
+
+    Special handling: When FactSet hasn't confirmed an event time, they set it to
+    midnight UTC (00:00:00). Normal timezone conversion would shift this to the
+    previous day (e.g., midnight UTC -> 19:00 EST previous day). Instead, we detect
+    midnight UTC and keep the date intact, setting local time to midnight as well.
+    """
     if not utc_str:
-        return ("", "", "", "")
+        return ("", "", "", "", False)
     try:
         dt = dateutil_parse(str(utc_str))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=pytz.UTC)
+
+        # Handle unconfirmed times: FactSet sets these to midnight UTC (00:00:00)
+        # Keep the date intact instead of shifting to previous day
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+            date_str = dt.strftime("%Y-%m-%d")
+            local_tz = pytz.timezone(LOCAL_TIMEZONE)
+            # Create midnight in local timezone for that same date
+            dt_local = local_tz.localize(
+                datetime(dt.year, dt.month, dt.day, 0, 0, 0)
+            )
+            tz_abbr = dt_local.strftime("%Z")
+            return (
+                dt.isoformat(),
+                dt_local.isoformat(),
+                date_str,
+                f"00:00 {tz_abbr}",
+                True,  # time_unconfirmed
+            )
+
         dt_local = dt.astimezone(pytz.timezone(LOCAL_TIMEZONE))
         tz_abbr = dt_local.strftime("%Z")
         if tz_abbr not in ("EST", "EDT"):
@@ -154,10 +181,11 @@ def convert_timezone(utc_str):
             dt_local.isoformat(),
             dt_local.strftime("%Y-%m-%d"),
             dt_local.strftime(f"%H:%M {tz_abbr}"),
+            False,  # time_unconfirmed
         )
     except (ValueError, TypeError, AttributeError) as e:
         log.warning("Failed to parse datetime '%s': %s", utc_str, e)
-        return ("", "", "", "")
+        return ("", "", "", "", False)
 
 
 def build_contact_info(event):
@@ -191,7 +219,15 @@ def transform_event(raw, institutions, timestamp):
         description = description.replace(raw_ticker, ticker)
 
     inst = institutions.get(ticker, {})
-    utc, local, date, time = convert_timezone(get_field(raw, "event_datetime_utc"))
+    utc, local, date, time, time_unconfirmed = convert_timezone(
+        get_field(raw, "event_datetime_utc")
+    )
+
+    # Mark headline when time is unconfirmed (FactSet sets to midnight UTC)
+    headline = description
+    if time_unconfirmed:
+        headline = f"{description} (Time TBD)"
+
     return {
         "event_id": get_field(raw, "event_id"),
         "ticker": ticker,
@@ -199,7 +235,7 @@ def transform_event(raw, institutions, timestamp):
         "institution_id": inst.get("id", ""),
         "institution_type": inst.get("type", "Unknown"),
         "event_type": get_field(raw, "event_type"),
-        "event_headline": description,
+        "event_headline": headline,
         "event_date_time_utc": utc,
         "event_date_time_local": local,
         "event_date": date,
