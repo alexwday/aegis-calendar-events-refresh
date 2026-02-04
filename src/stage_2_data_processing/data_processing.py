@@ -77,6 +77,8 @@ FIELD_MAPPING = {
     "contact_email": "contact_email",
     "fiscal_year": "fiscal_year",
     "fiscal_period": "fiscal_period",
+    "market_time_code": "market_time_code",
+    "last_modified_date": "last_modified_date",
 }
 
 # Output CSV columns matching PostgreSQL schema
@@ -137,26 +139,27 @@ def normalize_canadian_ticker(ticker):
     return ticker
 
 
-def convert_timezone(utc_str):
+def convert_timezone(utc_str, time_unconfirmed=False):
     """Convert UTC datetime string to local time.
 
-    Returns (utc_iso, local_iso, date, time, time_unconfirmed).
+    Returns (utc_iso, local_iso, date, time).
 
-    Special handling: When FactSet hasn't confirmed an event time, they set it to
-    midnight UTC (00:00:00). Normal timezone conversion would shift this to the
-    previous day (e.g., midnight UTC -> 19:00 EST previous day). Instead, we detect
-    midnight UTC and keep the date intact, setting local time to midnight as well.
+    Args:
+        utc_str: UTC datetime string to convert
+        time_unconfirmed: If True (from market_time_code="Unspecified"), preserve
+            the UTC date and set local time to midnight. This prevents unconfirmed
+            times (which FactSet sets to midnight UTC) from shifting to the previous
+            day during timezone conversion.
     """
     if not utc_str:
-        return ("", "", "", "", False)
+        return ("", "", "", "")
     try:
         dt = dateutil_parse(str(utc_str))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=pytz.UTC)
 
-        # Handle unconfirmed times: FactSet sets these to midnight UTC (00:00:00)
-        # Keep the date intact instead of shifting to previous day
-        if dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+        # Handle unconfirmed times: keep the date intact instead of shifting
+        if time_unconfirmed:
             date_str = dt.strftime("%Y-%m-%d")
             local_tz = pytz.timezone(LOCAL_TIMEZONE)
             # Create midnight in local timezone for that same date
@@ -169,7 +172,6 @@ def convert_timezone(utc_str):
                 dt_local.isoformat(),
                 date_str,
                 f"00:00 {tz_abbr}",
-                True,  # time_unconfirmed
             )
 
         dt_local = dt.astimezone(pytz.timezone(LOCAL_TIMEZONE))
@@ -181,11 +183,10 @@ def convert_timezone(utc_str):
             dt_local.isoformat(),
             dt_local.strftime("%Y-%m-%d"),
             dt_local.strftime(f"%H:%M {tz_abbr}"),
-            False,  # time_unconfirmed
         )
     except (ValueError, TypeError, AttributeError) as e:
         log.warning("Failed to parse datetime '%s': %s", utc_str, e)
-        return ("", "", "", "", False)
+        return ("", "", "", "")
 
 
 def build_contact_info(event):
@@ -219,11 +220,16 @@ def transform_event(raw, institutions, timestamp):
         description = description.replace(raw_ticker, ticker)
 
     inst = institutions.get(ticker, {})
-    utc, local, date, time, time_unconfirmed = convert_timezone(
-        get_field(raw, "event_datetime_utc")
+
+    # Check if time is unconfirmed (FactSet sets market_time_code to "Unspecified")
+    time_unconfirmed = get_field(raw, "market_time_code") == "Unspecified"
+
+    utc, local, date, time = convert_timezone(
+        get_field(raw, "event_datetime_utc"),
+        time_unconfirmed=time_unconfirmed,
     )
 
-    # Mark headline when time is unconfirmed (FactSet sets to midnight UTC)
+    # Mark headline when time is unconfirmed
     headline = description
     if time_unconfirmed:
         headline = f"{description} (Time TBD)"
@@ -245,6 +251,8 @@ def transform_event(raw, institutions, timestamp):
         "fiscal_year": normalize_fiscal_year(get_field(raw, "fiscal_year")),
         "fiscal_period": get_field(raw, "fiscal_period"),
         "data_fetched_timestamp": timestamp,
+        # Keep last_modified_date for earnings dedup (not in OUTPUT_SCHEMA)
+        "_last_modified_date": get_field(raw, "last_modified_date"),
     }
 
 
@@ -334,6 +342,71 @@ def dedupe_same_datetime(events):
     return result
 
 
+def dedupe_earnings_by_fiscal_period(events):
+    """
+    Deduplicate Earnings events by ticker + fiscal_year + fiscal_period.
+
+    When we query both -CA and -US tickers for Canadian banks, we may get duplicate
+    earnings events for the same fiscal period. After ticker normalization (both
+    become -CA), we keep only the most recently modified event for each combination.
+    """
+    earnings = []
+    other = []
+
+    for event in events:
+        if event.get("event_type") == "Earnings":
+            earnings.append(event)
+        else:
+            other.append(event)
+
+    if not earnings:
+        return events
+
+    # Group earnings by (ticker, fiscal_year, fiscal_period)
+    groups = defaultdict(list)
+    for event in earnings:
+        fy = event.get("fiscal_year", "")
+        fp = event.get("fiscal_period", "")
+        if fy and fp:
+            key = (event.get("ticker", ""), fy, fp)
+            groups[key].append(event)
+        else:
+            # No fiscal period info, can't dedupe - keep as-is
+            other.append(event)
+
+    # For each group, keep the event with the most recent last_modified_date
+    result = []
+    deduped_count = 0
+
+    for key, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+        else:
+            # Sort by last_modified_date descending (most recent first)
+            # Events without last_modified_date sort to the end
+            group.sort(
+                key=lambda e: e.get("_last_modified_date", "") or "",
+                reverse=True,
+            )
+            result.append(group[0])
+            deduped_count += len(group) - 1
+            log.debug(
+                "Earnings dedup %s FY%s Q%s: kept modified %s, dropped %d older",
+                key[0], key[1], key[2],
+                group[0].get("_last_modified_date", "unknown")[:10],
+                len(group) - 1,
+            )
+
+    if deduped_count:
+        log.info(
+            "Deduplicated %d earnings events by fiscal period (kept most recent)",
+            deduped_count,
+        )
+
+    result.extend(other)
+    return result
+
+
 def build_dedup_lookup():
     """Build lookup mapping source types to (target, priority)."""
     lookup = {}
@@ -389,7 +462,8 @@ def save_events(events, path):
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=OUTPUT_SCHEMA)
+        # extrasaction='ignore' drops internal fields like _last_modified_date
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_SCHEMA, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(events)
     return True
@@ -430,6 +504,12 @@ def main():
     events = dedupe_same_datetime(events)
     if before_datetime_dedup != len(events):
         log.info("After datetime dedup: %d events", len(events))
+
+    # Dedupe earnings events by fiscal period (keep most recently modified)
+    before_earnings_dedup = len(events)
+    events = dedupe_earnings_by_fiscal_period(events)
+    if before_earnings_dedup != len(events):
+        log.info("After earnings dedup: %d events", len(events))
 
     # Apply fiscal period dedup and renames
     before = len(events)
