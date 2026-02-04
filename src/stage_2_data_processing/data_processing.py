@@ -32,7 +32,8 @@ LOCAL_TIMEZONE = "America/Toronto"
 
 # Canadian bank tickers that should always be -CA, never -US
 # (FactSet sometimes returns these with -US suffix)
-CANADIAN_BANK_BASES = ["RY", "TD", "BMO", "BNS", "CM", "NA", "LB"]
+# Note: LB is excluded - LB-US is a different company, not Laurentian Bank
+CANADIAN_BANK_BASES = ["RY", "TD", "BMO", "BNS", "CM", "NA"]
 
 # Event types to include in final output
 INCLUDED_EVENT_TYPES = [

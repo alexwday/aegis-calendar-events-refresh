@@ -61,7 +61,7 @@ CANADIAN_BANK_US_VARIANTS = [
     "BNS-US",  # Bank of Nova Scotia
     "CM-US",   # Canadian Imperial Bank of Commerce
     "NA-US",   # National Bank of Canada
-    "LB-US",   # Laurentian Bank
+    # Note: LB-US is NOT Laurentian Bank - it's a different company
 ]
 # =============================================================================
 
